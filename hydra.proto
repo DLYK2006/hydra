@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package hydra;
+
+// This is the message that will carry our LLM data
+message TensorPacket {
+    int32 layer_index = 1;       // Which layer of the model this data belongs to
+    repeated float data = 2;     // The actual hidden state vector (activations)
+    string device_id = 3;        // The ID of the device sending the data
+    repeated int32 shape = 4;    // Logical dimensions of `data`, e.g. [4] for a length-4 vector
+}

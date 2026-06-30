@@ -1,0 +1,41 @@
+# ── Generated weight / data blobs ───────────────────────────────
+# These are regenerated locally by the extraction scripts in this repo.
+# They are large binary files and must never be committed.
+data/*.bin
+data/MNIST/
+
+# ── Compiled binaries ───────────────────────────────────────────
+orchestrator
+worker
+*.o
+*.out
+a.out
+
+# ── Protobuf generated code ─────────────────────────────────────
+# Regenerated per-machine via `make proto` — never share across machines
+# (different protobuf versions produce incompatible generated code).
+hydra.pb.h
+hydra.pb.cc
+
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ── Editor / OS noise ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ── Logs / scratch ──────────────────────────────────────────────
+*.log
+worker.log
+worker_out.log
+
+# Private working notes
+CLAUDE.md
+floatSum
+.claude/
+*nano*
