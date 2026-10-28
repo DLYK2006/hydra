@@ -47,5 +47,7 @@ worker_out.log
 CLAUDE.md
 reports/
 floatSum
-.claude/
+# .claude/ stays ignored except agents/ (tracked so reviewer edits are visible)
+.claude/*
+!.claude/agents/
 *nano*
