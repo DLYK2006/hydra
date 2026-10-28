@@ -11,7 +11,9 @@ Reads:
   data/attn_response_T{T}.bin   -- C++ worker output [T, 768] (written by orchestrator)
   data/attn_expected_T{T}.bin   -- double-precision reference [T, 768] (from extract_gpt2_attn.py)
 
-Tolerance: 1e-5.
+Tolerance: 1e-5. Measured max abs diff is 0.00e+00 at both T=1 and T=8
+  (June 2026 and live 2026-10-28), so the M4 in-place loosening to 1e-4 is
+  reverted.
 """
 
 import sys
@@ -19,8 +21,7 @@ import struct
 
 T          = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 HIDDEN_DIM = 768
-TOLERANCE  = 1e-4  # M3 (T=1) was bit-identical (softmax trivially 1.0); M4 has
-                   # real softmax so a small non-zero diff is expected and correct.
+TOLERANCE  = 1e-5  # measured 0.0 at T=1 and T=8; see docstring
 N_FLOATS   = T * HIDDEN_DIM
 
 def read_bin(path, n_floats):

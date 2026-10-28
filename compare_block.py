@@ -11,10 +11,10 @@ Reads:
   data/block_response_T{T}.bin   -- C++ worker output [T, 768]
   data/block_expected_T{T}.bin   -- double-precision reference [T, 768]
 
-Tolerance: 1e-4.  Residual adds between sub-blocks accumulate float32 error
-  that the per-stage cast no longer resets, so M6 will not be bit-identical.
-  1e-4 is the expected ceiling for two attention matmuls + two MLP matmuls
-  with float32 residuals connecting them.
+Tolerance: 6.1e-6 = 1.6 x measured max abs diff 3.81e-06 (T=8; June 2026
+  and live 2026-10-28, identical). Residual adds between sub-blocks keep M6
+  from being bit-identical, but the measured drift is ~1e-6, not ~1e-4.
+  Calibrated on the fixed T=8 input only.
 """
 
 import sys
@@ -22,7 +22,7 @@ import struct
 
 T          = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 HIDDEN_DIM = 768
-TOLERANCE  = 1e-4
+TOLERANCE  = 6.1e-6  # 1.6 x measured 3.81e-06
 N_FLOATS   = T * HIDDEN_DIM
 
 
@@ -65,7 +65,7 @@ print(f"Max abs diff     : {max_d:.2e}  at [row={row}, col={col}]")
 print(f"  expected[{max_idx}] = {expected[max_idx]:.8f}")
 print(f"  actual  [{max_idx}] = {actual[max_idx]:.8f}")
 print(f"Avg abs diff     : {avg_d:.2e}")
-print(f"Tolerance check  : {'PASS' if passed else 'FAIL'} (threshold {TOLERANCE:.0e})")
+print(f"Tolerance check  : {'PASS' if passed else 'FAIL'} (threshold {TOLERANCE:.1e})")
 if not passed:
     print()
     print("If diff > 1e-3, this is a wiring bug (skipped residual or wrong LN placement),")
