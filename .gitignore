@@ -1,13 +1,15 @@
 # ── Generated weight / data blobs ───────────────────────────────
 # These are regenerated locally by the extraction scripts in this repo.
-# They are large binary files and must never be committed.
+# Weights are large and must never be committed. The small frozen oracles
+# below (each <= 96 KiB) are tracked instead.
 data/*.bin
-# Small frozen oracles (inputs + expected outputs, each <= 96 KiB) are tracked:
-# compare_*.py diff against these. Weights and worker responses stay ignored.
+# Inputs + expected outputs: what compare_*.py diff against.
 !data/*_input_T*.bin
 !data/*_expected_*.bin
 !data/input.bin
 !data/expected_y.bin
+# June 2026 worker responses: regression oracles (live runs must cmp-identical).
+!data/*_response_*.bin
 data/live/
 data/MNIST/
 

@@ -1,0 +1,3 @@
+*.bin binary
+*.npy binary
+*.txt text eol=lf
