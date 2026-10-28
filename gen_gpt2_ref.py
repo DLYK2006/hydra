@@ -11,8 +11,12 @@ Two forward passes are run at each generation step, both receiving the same
 context (the float32-greedy token sequence so far):
 
   float32 pass: HuggingFace model() forward, float32 BLAS throughout.
-                Must match model.generate(do_sample=False) exactly -- verified
-                step-by-step below.
+                Tokens are chosen from HF's float32 logits and must match
+                model.generate(do_sample=False) exactly -- verified step-by-step
+                below.  Separately, the block-11 output (captured at ln_f's
+                input) goes through the same float64 ln_f + LM head as the
+                double pass; those logits are what max_abs_diff compares, so
+                the G5 budget measures the block path only.
 
   double pass:  mirrors the planned C++ worker + Python gen.py convention:
                   wte + wpe lookup: float32 (Python will compute and send to C++)
@@ -36,7 +40,8 @@ Writes:
                                with decoded strings.  Frozen reference for G4/G5.
   data/gen_ref_logits_f64.bin -- double-pass logits per step, raw float64,
                                [N_GEN, 50257] row-major (ln_f + LM head in float64).
-  data/gen_ref_summary.txt  -- per step: token, max|f32 - f64| of logits,
+  data/gen_ref_summary.txt  -- per step: token, max|f32 - f64| of logits
+                               (both through the float64 head),
                                f64 top-1 minus top-2 margin; header carries the
                                G5 tolerance = 1.6 x max(max_abs_diff); footer
                                carries the sha256 of gen_ref_logits_f64.bin.
@@ -140,6 +145,16 @@ def block_double(x: torch.Tensor, blk, T: int) -> torch.Tensor:
     return x
 
 
+def head_f64(x: torch.Tensor) -> torch.Tensor:
+    """float64 ln_f + LM head on block-11 output x [T, 768] -> logits [T, 50257]."""
+    # Final layer norm: float64 (block output upcast; gamma/beta upcast)
+    x = F.layer_norm(x.double(), [HIDDEN_DIM],
+                     weight=model.transformer.ln_f.weight.double(),
+                     bias=model.transformer.ln_f.bias.double())
+    # LM head: float64 x @ wte.T (weight-tied; same weights as model.lm_head)
+    return x @ model.transformer.wte.weight.double().T
+
+
 def forward_double(ctx_ids: list) -> torch.Tensor:
     """
     Full 12-block GPT-2 forward in the double-precision convention.
@@ -157,27 +172,32 @@ def forward_double(ctx_ids: list) -> torch.Tensor:
         for i in range(12):
             x = block_double(x, model.transformer.h[i], T)
 
-        # Final layer norm: float64 (block output upcast; gamma/beta upcast)
-        x = F.layer_norm(x.double(), [HIDDEN_DIM],
-                         weight=model.transformer.ln_f.weight.double(),
-                         bias=model.transformer.ln_f.bias.double())
-
-        # LM head: float64 x @ wte.T (weight-tied; same weights as model.lm_head)
-        logits = (x @ model.transformer.wte.weight.double().T)   # [T, 50257], float64
+        logits = head_f64(x)   # [T, 50257], float64
 
     return logits[-1]   # [50257], last position only
 
 
-def forward_f32(ctx_ids: list) -> torch.Tensor:
+def forward_f32(ctx_ids: list):
     """
     Float32 forward via HuggingFace model().
-    Returns logits [50257] at the last position.
-    Must match model.generate(do_sample=False) argmax exactly.
+    Returns (hf_logits, h64_logits), both [50257] at the last position:
+      hf_logits  -- HF's own float32 logits; argmax must match
+                    model.generate(do_sample=False) exactly (token selection).
+      h64_logits -- the same forward's block-11 output (float32, captured at
+                    ln_f's input) through head_f64(); used for max_abs_diff.
     """
     ids = torch.tensor([ctx_ids], dtype=torch.long)
+    captured = {}
+    hook = model.transformer.ln_f.register_forward_pre_hook(
+        lambda mod, args: captured.__setitem__("x", args[0]))
+    try:
+        with torch.no_grad():
+            out = model(ids)
+    finally:
+        hook.remove()
     with torch.no_grad():
-        out = model(ids)
-    return out.logits[0, -1, :]   # [50257]
+        h64 = head_f64(captured["x"][0])   # [T, 50257], float64
+    return out.logits[0, -1, :], h64[-1]
 
 
 # ── Step 1: Gold sequence from model.generate() ───────────────────────────────
@@ -215,7 +235,7 @@ print("\n[Step 2: Verifying forward_f32() == model.generate() at every step]")
 f32_mismatch = False
 for step in range(N_GEN):
     ctx  = prompt_ids + gold_new_ids[:step]
-    lf   = forward_f32(ctx)
+    lf, _ = forward_f32(ctx)
     pred = lf.argmax().item()
     exp  = gold_new_ids[step]
     if pred != exp:
@@ -234,7 +254,8 @@ else:
 # ── Step 3: Per-step float32 vs double comparison ─────────────────────────────
 # Context at each step: the float32-greedy token sequence so far.
 # Both passes receive identical context, so any logit diff is purely precision.
-print(f"\n[Step 3: Per-step logit comparison: float32 (HF BLAS) vs double (C++ convention)]")
+# Both go through the same float64 head_f64(), so the diff is the block path only.
+print(f"\n[Step 3: Per-step logit comparison: float32 blocks vs double blocks (C++ convention), float64 head on both]")
 print(f"  Context length grows from T={T_prompt} to T={T_prompt + N_GEN - 1}")
 print()
 hdr = f"{'step':>4}  {'max|f32-dbl|':>14}  {'avg|f32-dbl|':>14}  {'f32_tok':>8}  {'dbl_tok':>8}  agree"
@@ -251,10 +272,10 @@ t_start = time.time()
 for step in range(N_GEN):
     ctx = prompt_ids + gold_new_ids[:step]
 
-    lf  = forward_f32(ctx)
-    ld  = forward_double(ctx)
+    lf, lf_h64 = forward_f32(ctx)   # lf: HF float32 logits (token choice)
+    ld         = forward_double(ctx)
 
-    diff  = (lf - ld).abs()
+    diff  = (lf_h64 - ld).abs()
     max_d = diff.max().item()
     avg_d = diff.mean().item()
     max_diffs.append(max_d)
@@ -354,7 +375,9 @@ with open(summary_path, "w", newline="\n") as f:
     f.write("# G1 per-step summary -- context = float32-greedy tokens so far\n")
     f.write(f"# PROMPT = {repr(PROMPT)}\n")
     f.write(f"# N_GEN  = {N_GEN}\n")
-    f.write("# max_abs_diff = max|logits_f32 - logits_f64| over the vocab\n")
+    f.write("# max_abs_diff = max|logits_f32 - logits_f64| over the vocab;\n")
+    f.write("#   f32 = HF float32 blocks, f64 = double-convention blocks;\n")
+    f.write("#   both through the same float64 ln_f + LM head (block path only)\n")
     f.write("# f64_margin   = top-1 minus top-2 of logits_f64\n")
     f.write(f"# max(max_abs_diff) = {overall_max:.6e}  (step {step_max_idx})\n")
     f.write(f"# G5 tolerance = {G5_TOL_FACTOR} x max(max_abs_diff) = {g5_tolerance:.6e}\n")
