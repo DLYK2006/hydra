@@ -1,0 +1,27 @@
+# Gold token sequence -- float32 greedy (model.generate, do_sample=False)
+# PROMPT = 'Hello, how are you doing today? I hope everything'
+# N_GEN  = 20
+# T_prompt = 11
+# prompt_ids = [15496, 11, 703, 389, 345, 1804, 1909, 30, 314, 2911, 2279]
+#
+# step  token_id  decoded
+   0      318  ' is'
+   1     1016  ' going'
+   2      880  ' well'
+   3       13  '.'
+   4      314  ' I'
+   5     1101  "'m"
+   6     1107  ' really'
+   7     3772  ' happy'
+   8       13  '.'
+   9      314  ' I'
+  10     1101  "'m"
+  11     1107  ' really'
+  12     3772  ' happy'
+  13       13  '.'
+  14      314  ' I'
+  15     1101  "'m"
+  16     1107  ' really'
+  17     3772  ' happy'
+  18       13  '.'
+  19      314  ' I'
