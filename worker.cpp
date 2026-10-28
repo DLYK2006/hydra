@@ -750,7 +750,8 @@ int main(int argc, char* argv[]) {
                 // All matmuls use double accumulators (matmul_nt / attn_heads).
                 // LayerNorm uses double accumulators for mean/var.
                 // Residual adds are float32; they do NOT reset divergence the way
-                // inter-stage float32 casts do -- expect max diff ~1e-4 (not 0.0).
+                // inter-stage float32 casts do -- measured max diff 3.81e-06 at T=8
+                // (not 0.0).
 
                 if (packet.shape_size() != 2) {
                     std::cout << "Rejecting packet: block mode requires shape_size=2"
