@@ -33,10 +33,18 @@ G1 obligations (must be met before G2 starts):
       constant; derived from the measurement with written justification.
 
 Writes:
-  data/gen_ref_tokens.txt  -- gold token IDs (float32-greedy), one per line,
-                              with decoded strings.  Frozen reference for G4/G5.
+  data/gen_ref_tokens.txt   -- gold token IDs (float32-greedy), one per line,
+                               with decoded strings.  Frozen reference for G4/G5.
+  data/gen_ref_logits_f64.bin -- double-pass logits per step, raw float64,
+                               [N_GEN, 50257] row-major.  The LM head itself is
+                               float32 (see forward_double), so these values are
+                               float32-exact, upcast for storage.
+  data/gen_ref_summary.txt  -- per step: token, max|f32 - f64| of logits,
+                               f64 top-1 minus top-2 margin; plus the sha256
+                               of gen_ref_logits_f64.bin.
 """
 
+import hashlib
 import os
 import time
 import torch
@@ -238,6 +246,8 @@ print("-" * len(hdr))
 max_diffs   = []
 n_agree     = 0
 mismatches  = []
+dbl_logits  = []   # per-step double-pass logits, saved for G5
+f64_margins = []   # per-step f64 top-1 minus top-2
 
 t_start = time.time()
 for step in range(N_GEN):
@@ -250,6 +260,11 @@ for step in range(N_GEN):
     max_d = diff.max().item()
     avg_d = diff.mean().item()
     max_diffs.append(max_d)
+
+    ld64 = ld.double()
+    dbl_logits.append(ld64)
+    top2_d = ld64.topk(2).values
+    f64_margins.append((top2_d[0] - top2_d[1]).item())
 
     tok_f = lf.argmax().item()
     tok_d = ld.argmax().item()
@@ -321,7 +336,7 @@ print(f"  max is implausibly large (> 1e-2), diagnose before setting the toleran
 # ── Step 5: Write frozen gold reference ───────────────────────────────────────
 os.makedirs("data", exist_ok=True)
 ref_path = "data/gen_ref_tokens.txt"
-with open(ref_path, "w") as f:
+with open(ref_path, "w", newline="\n") as f:
     f.write("# Gold token sequence -- float32 greedy (model.generate, do_sample=False)\n")
     f.write(f"# PROMPT = {repr(PROMPT)}\n")
     f.write(f"# N_GEN  = {N_GEN}\n")
@@ -332,3 +347,23 @@ with open(ref_path, "w") as f:
     for step, tid in enumerate(gold_new_ids):
         f.write(f"{step:4d}  {tid:7d}  {repr(tokenizer.decode([tid]))}\n")
 print(f"\nGold reference written to {ref_path}")
+
+# ── Step 6: Per-step double-pass logits + summary for G5 ──────────────────────
+logits_path = "data/gen_ref_logits_f64.bin"
+torch.stack(dbl_logits).numpy().tofile(logits_path)   # [N_GEN, 50257] float64
+with open(logits_path, "rb") as f:
+    logits_sha = hashlib.sha256(f.read()).hexdigest()
+
+summary_path = "data/gen_ref_summary.txt"
+with open(summary_path, "w", newline="\n") as f:
+    f.write("# G1 per-step summary -- context = float32-greedy tokens so far\n")
+    f.write(f"# PROMPT = {repr(PROMPT)}\n")
+    f.write(f"# N_GEN  = {N_GEN}\n")
+    f.write("# max_abs_diff = max|logits_f32 - logits_f64| over the vocab\n")
+    f.write("# f64_margin   = top-1 minus top-2 of logits_f64\n")
+    f.write("# step  token  max_abs_diff  f64_margin\n")
+    for step in range(N_GEN):
+        f.write(f"{step:4d}  {gold_new_ids[step]:5d}  {max_diffs[step]:.6e}  {f64_margins[step]:.6e}\n")
+    f.write(f"# sha256({logits_path}) = {logits_sha}\n")
+print(f"Per-step logits written to {logits_path} (sha256 {logits_sha})")
+print(f"Summary written to {summary_path}")
