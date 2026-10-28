@@ -2,6 +2,13 @@
 # These are regenerated locally by the extraction scripts in this repo.
 # They are large binary files and must never be committed.
 data/*.bin
+# Small frozen oracles (inputs + expected outputs, each <= 96 KiB) are tracked:
+# compare_*.py diff against these. Weights and worker responses stay ignored.
+!data/*_input_T*.bin
+!data/*_expected_*.bin
+!data/input.bin
+!data/expected_y.bin
+data/live/
 data/MNIST/
 
 # ── Compiled binaries ───────────────────────────────────────────
@@ -36,6 +43,7 @@ worker_out.log
 
 # Private working notes
 CLAUDE.md
+reports/
 floatSum
 .claude/
 *nano*
