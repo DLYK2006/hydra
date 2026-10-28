@@ -20,9 +20,8 @@ context (the float32-greedy token sequence so far):
                              float32 cast at each stage boundary (matches C++
                              matmul_nt / attn_heads / layernorm convention)
                              float32 residual adds (matches C++ block mode)
-                  ln_f:  float32 F.layer_norm (C++ double accumulators match to
-                         ~1e-7 per M1 -- negligible at this scale)
-                  LM head: float32 x @ wte.T (matches what gen.py will do in G4)
+                  ln_f:    float64 F.layer_norm (input, gamma, beta upcast)
+                  LM head: float64 x @ wte.T (wte upcast); logits are float64
 
 G1 obligations (must be met before G2 starts):
   (a) Verify float32 forward-pass argmax == model.generate() at every step.
@@ -36,12 +35,11 @@ Writes:
   data/gen_ref_tokens.txt   -- gold token IDs (float32-greedy), one per line,
                                with decoded strings.  Frozen reference for G4/G5.
   data/gen_ref_logits_f64.bin -- double-pass logits per step, raw float64,
-                               [N_GEN, 50257] row-major.  The LM head itself is
-                               float32 (see forward_double), so these values are
-                               float32-exact, upcast for storage.
+                               [N_GEN, 50257] row-major (ln_f + LM head in float64).
   data/gen_ref_summary.txt  -- per step: token, max|f32 - f64| of logits,
-                               f64 top-1 minus top-2 margin; plus the sha256
-                               of gen_ref_logits_f64.bin.
+                               f64 top-1 minus top-2 margin; header carries the
+                               G5 tolerance = 1.6 x max(max_abs_diff); footer
+                               carries the sha256 of gen_ref_logits_f64.bin.
 """
 
 import hashlib
@@ -145,7 +143,7 @@ def block_double(x: torch.Tensor, blk, T: int) -> torch.Tensor:
 def forward_double(ctx_ids: list) -> torch.Tensor:
     """
     Full 12-block GPT-2 forward in the double-precision convention.
-    Returns float32 logits [50257] at the last token position only.
+    Returns float64 logits [50257] at the last token position only.
     """
     T   = len(ctx_ids)
     ids = torch.tensor([ctx_ids], dtype=torch.long)
@@ -159,13 +157,13 @@ def forward_double(ctx_ids: list) -> torch.Tensor:
         for i in range(12):
             x = block_double(x, model.transformer.h[i], T)
 
-        # Final layer norm: float32 (gen.py will call model.transformer.ln_f)
-        x = F.layer_norm(x, [HIDDEN_DIM],
-                         weight=model.transformer.ln_f.weight,
-                         bias=model.transformer.ln_f.bias)
+        # Final layer norm: float64 (block output upcast; gamma/beta upcast)
+        x = F.layer_norm(x.double(), [HIDDEN_DIM],
+                         weight=model.transformer.ln_f.weight.double(),
+                         bias=model.transformer.ln_f.bias.double())
 
-        # LM head: float32 x @ wte.T (weight-tied; same as model.lm_head(x))
-        logits = (x @ model.transformer.wte.weight.T)   # [T, 50257], float32
+        # LM head: float64 x @ wte.T (weight-tied; same weights as model.lm_head)
+        logits = (x @ model.transformer.wte.weight.double().T)   # [T, 50257], float64
 
     return logits[-1]   # [50257], last position only
 
@@ -228,7 +226,7 @@ for step in range(N_GEN):
               f"  expected={exp} ({repr(tokenizer.decode([exp]))})"
               f"  top2-margin={margin:.4e}")
 if not f32_mismatch:
-    print("  All steps match -- forward_f32() == model.generate() ✓")
+    print("  All steps match -- forward_f32() == model.generate() [OK]")
 else:
     print("  WARNING: mismatch above means forward_f32() is not faithful to model.generate()")
     print("           Investigate before treating float32 logits as the reference.")
@@ -278,7 +276,7 @@ for step in range(N_GEN):
         top2   = lf.topk(2).values
         margin = (top2[0] - top2[1]).item()
         tie    = (margin < 2.0 * max_d)
-        note   = (f"  ← MISMATCH  f32-margin={margin:.2e} "
+        note   = (f"  <- MISMATCH  f32-margin={margin:.2e} "
                   f"{'[near-tie: not a bug]' if tie else '[margin >> diff: investigate]'}")
         mismatches.append((step, tok_f, tok_d, margin, max_d, tie))
 
@@ -291,7 +289,7 @@ for step in range(N_GEN):
           f"{tok_f:5d}    {tok_d:5d}  {'Y' if agree else 'N'}{note}")
 
 elapsed = time.time() - t_start
-print(f"\n  ({elapsed:.1f}s for {N_GEN} steps × 2 forward passes = {elapsed/N_GEN:.1f}s/step avg)")
+print(f"\n  ({elapsed:.1f}s for {N_GEN} steps x 2 forward passes = {elapsed/N_GEN:.1f}s/step avg)")
 
 # ── Step 4: Summary and G5 tolerance derivation ───────────────────────────────
 overall_max = max(max_diffs)
@@ -306,7 +304,7 @@ print(f"PROMPT   = {repr(PROMPT)}")
 print(f"N_GEN    = {N_GEN}")
 print(f"T_prompt = {T_prompt}  (context grows to T={T_prompt + N_GEN - 1} at last step)")
 print()
-print(f"float32 forward vs model.generate() : {'ALL MATCH ✓' if not f32_mismatch else 'MISMATCH -- see Step 2'}")
+print(f"float32 forward vs model.generate() : {'ALL MATCH [OK]' if not f32_mismatch else 'MISMATCH -- see Step 2'}")
 print(f"Token agreement (f32 vs double)     : {n_agree}/{N_GEN} steps agree")
 
 if mismatches:
@@ -323,15 +321,12 @@ print(f"  Overall max|diff| across {N_GEN} steps : {overall_max:.4e}  (at step {
 print(f"  Mean of per-step max|diff|             : {overall_avg:.4e}")
 print(f"  Min  of per-step max|diff|             : {min(max_diffs):.4e}  (at step {max_diffs.index(min(max_diffs))})")
 print()
-print("G5 tolerance derivation:")
-print(f"  Measured max|logits_f32 - logits_double| = {overall_max:.4e}")
-print(f"  Source: {overall_max:.4e} = accumulated error across 12 blocks + ln_f + LM head")
-print(f"  At M6 single-block level: max diff was 3.81e-06 per block.")
-print(f"  12 blocks compound additively; LM head (768-term matmul x 50257) adds ~1e-5 more.")
-print(f"  Safety factor 3x applied: {3.0 * overall_max:.2e}  <-- provisional G5 tolerance")
-print(f"  IMPORTANT: this is provisional. The G5 tolerance must be set to the SMALLEST")
-print(f"  value that passes all N_GEN steps, with written justification. If the measured")
-print(f"  max is implausibly large (> 1e-2), diagnose before setting the tolerance.")
+# G5 tolerance: 1.6 x the measured worst case, same rule as the M-series
+# compare scripts. Written into the summary header below.
+G5_TOL_FACTOR = 1.6
+g5_tolerance  = G5_TOL_FACTOR * overall_max
+print(f"G5 tolerance = {G5_TOL_FACTOR} x max(max_abs_diff) = "
+      f"{G5_TOL_FACTOR} x {overall_max:.6e} = {g5_tolerance:.6e}")
 
 # ── Step 5: Write frozen gold reference ───────────────────────────────────────
 os.makedirs("data", exist_ok=True)
@@ -361,6 +356,8 @@ with open(summary_path, "w", newline="\n") as f:
     f.write(f"# N_GEN  = {N_GEN}\n")
     f.write("# max_abs_diff = max|logits_f32 - logits_f64| over the vocab\n")
     f.write("# f64_margin   = top-1 minus top-2 of logits_f64\n")
+    f.write(f"# max(max_abs_diff) = {overall_max:.6e}  (step {step_max_idx})\n")
+    f.write(f"# G5 tolerance = {G5_TOL_FACTOR} x max(max_abs_diff) = {g5_tolerance:.6e}\n")
     f.write("# step  token  max_abs_diff  f64_margin\n")
     for step in range(N_GEN):
         f.write(f"{step:4d}  {gold_new_ids[step]:5d}  {max_diffs[step]:.6e}  {f64_margins[step]:.6e}\n")
