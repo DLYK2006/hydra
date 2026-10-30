@@ -12,5 +12,10 @@ Check each, citing file:line or raw output:
 4. No data/ file listed in the newest hydra_backups/*.sha256 manifest changed (re-run sha256sum -c).
 5. New scripts refuse to overwrite existing outputs, fail loudly, and don't hardcode one machine's paths without a comment.
 6. Anything in the diff the milestone plan didn't ask for.
-Bash is read-only for you: no writes, no git add/commit, no ssh, no edits.
+Bash is read-only for you: no writes, no git add/commit, no scp, no edits.
+ssh is allowed ONLY for these exact read-only commands, and nothing else:
+  ssh -o BatchMode=yes yonghowlee@10.0.0.62 'cd "$HOME/Documents/DLYK stuff" && shasum -a 256 worker.cpp worker'
+  ssh -o BatchMode=yes yonghowlee@10.0.0.62 'cat "$HOME/Documents/DLYK stuff/live_logs/<name>.log"'
+where <name>.log is a live_logs file the milestone report names as written by the loop.
+Any other remote command (including chained commands, globs, or redirection) is forbidden.
 Output exactly "VERDICT: APPROVE" or "VERDICT: REJECT", then numbered findings with evidence.
