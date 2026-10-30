@@ -1,0 +1,17 @@
+# G3 reference summary -- informational only, not a gate
+# input: data/block_input_T8.bin [8, 768]
+# f64 = double-convention reference (data/g3_expected_hNN_T8.bin)
+# f32 = PyTorch float32 GPT2Block forward, same weights and input
+# block  max|f32 - f64|
+   0  2.288818e-05
+   1  6.103516e-05
+   2  5.493164e-04
+   3  7.629395e-05
+   4  1.525879e-05
+   5  3.814697e-05
+   6  1.144409e-05
+   7  2.002716e-05
+   8  2.288818e-05
+   9  2.861023e-05
+  10  4.196167e-05
+  11  4.272461e-04
