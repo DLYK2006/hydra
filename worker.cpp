@@ -260,6 +260,27 @@ constexpr int ATTN_N_HEAD   = 12;
 constexpr int ATTN_HEAD_DIM = 64;    // HIDDEN_DIM / ATTN_N_HEAD
 constexpr int MLP_HIDDEN_DIM = 3072; // 4 * HIDDEN_DIM
 
+// G3: block mode holds all 12 GPT-2 blocks and dispatches on layer_index.
+constexpr int N_BLOCKS = 12;
+
+// G3: cap on one framed message, checked before buffer.resize(). The largest
+// legitimate inbound packet is [T, 768] fp32; at GPT-2's n_ctx = 1024 that is
+// 3,145,728 data bytes plus < 64 bytes of protobuf tags/shape, so 4 MiB clears
+// it (and implicitly bounds T at ~1365). Without a cap, a corrupt or hostile
+// 4-byte length prefix makes the worker try a ~4 GiB allocation.
+constexpr uint32_t MAX_MSG_LEN = 4u << 20;  // 4 MiB
+
+// G3: one GPT-2 block's weights, loaded from data/h{NN}_<name>.bin (written by
+// extract_gpt2_all_blocks.py; Conv1D matrices are [in, out] row-major).
+struct BlockWeights {
+    std::vector<float> ln1_gamma, ln1_beta;       // [HIDDEN_DIM]
+    std::vector<float> c_attn_W, c_attn_b;        // [HIDDEN_DIM x QKV_OUT_DIM], [QKV_OUT_DIM]
+    std::vector<float> attn_proj_W, attn_proj_b;  // [HIDDEN_DIM x HIDDEN_DIM], [HIDDEN_DIM]
+    std::vector<float> ln2_gamma, ln2_beta;       // [HIDDEN_DIM]
+    std::vector<float> c_fc_W, c_fc_b;            // [HIDDEN_DIM x MLP_HIDDEN_DIM], [MLP_HIDDEN_DIM]
+    std::vector<float> mlp_proj_W, mlp_proj_b;    // [MLP_HIDDEN_DIM x HIDDEN_DIM], [HIDDEN_DIM]
+};
+
 // Hardening milestone: minimal graceful shutdown. SIGINT/SIGTERM set this
 // flag from the handler -- the only thing safe to do in a signal handler per
 // POSIX async-signal-safety (no I/O, no close()). main()'s accept loop checks
@@ -319,10 +340,9 @@ int main(int argc, char* argv[]) {
     std::vector<float> attn_proj_b;  // attention mode: c_proj bias [HIDDEN_DIM]
     std::vector<float> mlp_c_fc_W;   // mlp mode: c_fc W[HIDDEN_DIM x MLP_HIDDEN_DIM], [in, out]
     std::vector<float> mlp_c_fc_b;   // mlp mode: c_fc bias [MLP_HIDDEN_DIM]
-    std::vector<float> mlp_c_proj_W; // mlp/block mode: c_proj W[MLP_HIDDEN_DIM x HIDDEN_DIM], [in, out]
-    std::vector<float> mlp_c_proj_b; // mlp/block mode: c_proj bias [HIDDEN_DIM]
-    std::vector<float> ln2_gamma;    // block mode: ln_2 scale [HIDDEN_DIM]
-    std::vector<float> ln2_beta;     // block mode: ln_2 shift [HIDDEN_DIM]
+    std::vector<float> mlp_c_proj_W; // mlp mode: c_proj W[MLP_HIDDEN_DIM x HIDDEN_DIM], [in, out]
+    std::vector<float> mlp_c_proj_b; // mlp mode: c_proj bias [HIDDEN_DIM]
+    std::vector<BlockWeights> blocks; // block mode: all N_BLOCKS blocks, indexed by layer_index
 
     if (mode == "linear") {
         if (!loadFloatsFromFile("data/layer0_weights.bin",
@@ -383,36 +403,36 @@ int main(int argc, char* argv[]) {
         std::cout << "Loaded MLP c_fc W [" << HIDDEN_DIM << "," << MLP_HIDDEN_DIM
                   << "] and c_proj W [" << MLP_HIDDEN_DIM << "," << HIDDEN_DIM
                   << "]" << std::endl;
-    } else {  // block: all sub-module weights
-        if (!loadFloatsFromFile("data/ln_gamma.bin", HIDDEN_DIM, ln_gamma))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/ln_beta.bin", HIDDEN_DIM, ln_beta))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/qkv_W.bin",
-                                QKV_IN_DIM * QKV_OUT_DIM, qkv_W))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/qkv_b.bin", QKV_OUT_DIM, qkv_b))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/attn_proj_W.bin",
-                                HIDDEN_DIM * HIDDEN_DIM, attn_proj_W))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/attn_proj_b.bin", HIDDEN_DIM, attn_proj_b))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/block_ln2_gamma.bin", HIDDEN_DIM, ln2_gamma))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/block_ln2_beta.bin", HIDDEN_DIM, ln2_beta))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/mlp_c_fc_W.bin",
-                                HIDDEN_DIM * MLP_HIDDEN_DIM, mlp_c_fc_W))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/mlp_c_fc_b.bin", MLP_HIDDEN_DIM, mlp_c_fc_b))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/mlp_c_proj_W.bin",
-                                MLP_HIDDEN_DIM * HIDDEN_DIM, mlp_c_proj_W))
-            return EXIT_FAILURE;
-        if (!loadFloatsFromFile("data/mlp_c_proj_b.bin", HIDDEN_DIM, mlp_c_proj_b))
-            return EXIT_FAILURE;
-        std::cout << "Loaded full block weights (ln1, c_attn, c_proj, ln2, c_fc, c_proj_mlp)"
+    } else {  // block: all N_BLOCKS blocks from data/h{NN}_<name>.bin
+        blocks.resize(N_BLOCKS);
+        size_t total_bytes = 0;
+        for (int n = 0; n < N_BLOCKS; n++) {
+            BlockWeights& w = blocks[n];
+            // (file name, element count, destination) -- sizes are exact, so a
+            // missing or truncated h-file fails here, before bind().
+            const struct { const char* name; size_t count; std::vector<float>* dst; } files[] = {
+                {"ln1_gamma",   HIDDEN_DIM,                                       &w.ln1_gamma},
+                {"ln1_beta",    HIDDEN_DIM,                                       &w.ln1_beta},
+                {"c_attn_W",    static_cast<size_t>(QKV_IN_DIM) * QKV_OUT_DIM,    &w.c_attn_W},
+                {"c_attn_b",    QKV_OUT_DIM,                                      &w.c_attn_b},
+                {"attn_proj_W", static_cast<size_t>(HIDDEN_DIM) * HIDDEN_DIM,     &w.attn_proj_W},
+                {"attn_proj_b", HIDDEN_DIM,                                       &w.attn_proj_b},
+                {"ln2_gamma",   HIDDEN_DIM,                                       &w.ln2_gamma},
+                {"ln2_beta",    HIDDEN_DIM,                                       &w.ln2_beta},
+                {"c_fc_W",      static_cast<size_t>(HIDDEN_DIM) * MLP_HIDDEN_DIM, &w.c_fc_W},
+                {"c_fc_b",      MLP_HIDDEN_DIM,                                   &w.c_fc_b},
+                {"mlp_proj_W",  static_cast<size_t>(MLP_HIDDEN_DIM) * HIDDEN_DIM, &w.mlp_proj_W},
+                {"mlp_proj_b",  HIDDEN_DIM,                                       &w.mlp_proj_b},
+            };
+            for (const auto& f : files) {
+                char path[64];
+                std::snprintf(path, sizeof(path), "data/h%02d_%s.bin", n, f.name);
+                if (!loadFloatsFromFile(path, f.count, *f.dst))
+                    return EXIT_FAILURE;
+                total_bytes += f.count * sizeof(float);
+            }
+        }
+        std::cout << "Loaded " << N_BLOCKS << " blocks (" << total_bytes << " bytes)"
                   << std::endl;
     }
 
@@ -476,6 +496,15 @@ int main(int argc, char* argv[]) {
             }
 
             uint32_t msg_len = ntohl(net_len);
+            // The payload can't be skipped without reading it, so framing is
+            // lost: drop only this connection and return to accept().
+            if (msg_len > MAX_MSG_LEN) {
+                std::cout << "Rejecting message: length prefix " << msg_len
+                          << " bytes exceeds MAX_MSG_LEN " << MAX_MSG_LEN
+                          << "; closing connection" << std::endl;
+                connection_ok = false;
+                break;
+            }
             buffer.resize(msg_len);
 
             r = recvAll(new_socket, buffer.data(), msg_len);
@@ -753,6 +782,30 @@ int main(int argc, char* argv[]) {
                 // inter-stage float32 casts do -- measured max diff 3.81e-06 at T=8
                 // (not 0.0).
 
+                // G3: dispatch on layer_index. Out of range -> error reply (the
+                // response already carries layer_index and device_id from above;
+                // no data, no shape is the "rejected" contract, since a valid
+                // reply always has shape [T, 768]). Connection and worker stay up.
+                const int L = packet.layer_index();
+                if (L < 0 || L >= N_BLOCKS) {
+                    std::cout << "Rejecting packet: layer_index " << L
+                              << " outside [0, " << N_BLOCKS - 1 << "]; sending error reply"
+                              << std::endl;
+                    std::string err_serialized;
+                    if (!response.SerializeToString(&err_serialized)) {
+                        std::cout << "Failed to serialize error reply" << std::endl;
+                        connection_ok = false;
+                        break;
+                    }
+                    if (!sendPacket(new_socket, err_serialized)) {
+                        std::cout << "Failed to send error reply: " << strerror(errno) << std::endl;
+                        connection_ok = false;
+                        break;
+                    }
+                    continue;
+                }
+                const BlockWeights& w = blocks[L];
+
                 if (packet.shape_size() != 2) {
                     std::cout << "Rejecting packet: block mode requires shape_size=2"
                               << ", got shape_size=" << packet.shape_size() << std::endl;
@@ -786,13 +839,13 @@ int main(int argc, char* argv[]) {
                 // Step 1a: ln_1 applied row-by-row (each token independent)
                 for (int t = 0; t < pkt_T; t++) {
                     layernorm(x.data()   + t * HIDDEN_DIM,
-                              ln_gamma.data(), ln_beta.data(),
+                              w.ln1_gamma.data(), w.ln1_beta.data(),
                               x_n.data() + t * HIDDEN_DIM, HIDDEN_DIM);
                 }
 
                 // Step 1b: QKV projection  [T,768] -> [T,2304]
                 std::vector<float> qkv_buf(static_cast<size_t>(pkt_T) * QKV_OUT_DIM);
-                matmul_nt(x_n.data(), qkv_W.data(), qkv_b.data(),
+                matmul_nt(x_n.data(), w.c_attn_W.data(), w.c_attn_b.data(),
                           qkv_buf.data(), pkt_T, QKV_IN_DIM, QKV_OUT_DIM);
 
                 // Step 1c: multi-head causal attention  [T,2304] -> [T,768]
@@ -802,7 +855,7 @@ int main(int argc, char* argv[]) {
 
                 // Step 1d: c_proj  [T,768] -> [T,768]
                 std::vector<float> attn_proj(elems);
-                matmul_nt(attn_out.data(), attn_proj_W.data(), attn_proj_b.data(),
+                matmul_nt(attn_out.data(), w.attn_proj_W.data(), w.attn_proj_b.data(),
                           attn_proj.data(), pkt_T, HIDDEN_DIM, HIDDEN_DIM);
 
                 // Step 1e: first residual add (float32)
@@ -814,13 +867,13 @@ int main(int argc, char* argv[]) {
                 // Step 2a: ln_2 applied row-by-row
                 for (int t = 0; t < pkt_T; t++) {
                     layernorm(x.data()   + t * HIDDEN_DIM,
-                              ln2_gamma.data(), ln2_beta.data(),
+                              w.ln2_gamma.data(), w.ln2_beta.data(),
                               x_n.data() + t * HIDDEN_DIM, HIDDEN_DIM);
                 }
 
                 // Step 2b: c_fc  [T,768] -> [T,3072]
                 std::vector<float> fc_out(static_cast<size_t>(pkt_T) * MLP_HIDDEN_DIM);
-                matmul_nt(x_n.data(), mlp_c_fc_W.data(), mlp_c_fc_b.data(),
+                matmul_nt(x_n.data(), w.c_fc_W.data(), w.c_fc_b.data(),
                           fc_out.data(), pkt_T, HIDDEN_DIM, MLP_HIDDEN_DIM);
 
                 // Step 2c: GELU (tanh approximation) elementwise
@@ -828,14 +881,14 @@ int main(int argc, char* argv[]) {
 
                 // Step 2d: c_proj  [T,3072] -> [T,768]
                 std::vector<float> mlp_out(elems);
-                matmul_nt(fc_out.data(), mlp_c_proj_W.data(), mlp_c_proj_b.data(),
+                matmul_nt(fc_out.data(), w.mlp_proj_W.data(), w.mlp_proj_b.data(),
                           mlp_out.data(), pkt_T, MLP_HIDDEN_DIM, HIDDEN_DIM);
 
                 // Step 2e: second residual add (float32)
                 for (size_t i = 0; i < elems; ++i)
                     x[i] += mlp_out[i];
 
-                std::cout << "Computed block [" << pkt_T << "," << HIDDEN_DIM
+                std::cout << "Computed block layer " << L << " [" << pkt_T << "," << HIDDEN_DIM
                           << "]  out[0:4]=["
                           << x[0] << "," << x[1] << "," << x[2] << "," << x[3]
                           << "]" << std::endl;

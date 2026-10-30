@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <string>
 #include <fstream>
+#include <limits>
 #include <sys/time.h>
 
 #include "hydra.pb.h"
@@ -135,13 +136,32 @@ int main(int argc, char* argv[]) {
     // --mode linear    : MNIST fc1 forward pass (default, backward-compat)
     // --mode layernorm : GPT-2 block-0 ln_1 forward pass
     // --T N            : sequence length for layernorm mode (default 1)
+    // --layer N        : TensorPacket.layer_index to send (default 0). Block
+    //                    mode dispatches on it. Deliberately NOT range-checked
+    //                    here, so out-of-range indices can be sent to test the
+    //                    worker's rejection path.
     std::string mode = "linear";
     int T = 1;
+    int layer = 0;
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--mode" && i + 1 < argc) {
             mode = argv[++i];
         } else if (std::string(argv[i]) == "--T" && i + 1 < argc) {
             T = std::atoi(argv[++i]);
+        } else if (std::string(argv[i]) == "--layer" && i + 1 < argc) {
+            // strtol + end-pointer check: atoi would turn "abc" into 0 and
+            // silently send layer 0.
+            const char* s = argv[++i];
+            char* end = nullptr;
+            errno = 0;
+            long v = std::strtol(s, &end, 10);
+            if (end == s || *end != '\0' || errno == ERANGE
+                    || v < std::numeric_limits<int>::min()
+                    || v > std::numeric_limits<int>::max()) {
+                std::cout << "Invalid --layer '" << s << "': must be an integer" << std::endl;
+                return -1;
+            }
+            layer = static_cast<int>(v);
         }
     }
     if (mode != "linear" && mode != "layernorm" && mode != "qkv"
@@ -204,7 +224,7 @@ int main(int argc, char* argv[]) {
     }
 
     hydra::TensorPacket packet;
-    packet.set_layer_index(0);
+    packet.set_layer_index(layer);
     packet.set_device_id("orchestrator-wsl2");
     for (float v : input_data) {
         packet.add_data(v);
@@ -354,6 +374,15 @@ int main(int argc, char* argv[]) {
         }
         close(sock);
         return -1;
+    }
+
+    // G3: a reply with no shape is the worker's "rejected" contract (every
+    // valid reply carries a shape). Exit 2 -- distinct from -1 (255) for
+    // transport errors -- and write no response file.
+    if (response.shape_size() == 0) {
+        std::cout << "Worker rejected layer_index " << response.layer_index() << std::endl;
+        close(sock);
+        return 2;
     }
 
     std::cout << "Received response for layer " << response.layer_index()
