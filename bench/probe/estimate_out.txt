@@ -1,0 +1,8 @@
+inputs: uncached 68.088 s, cached prefill 58.610 s, ping avg 72.022 ms
+row=4.26 ms/row/block  pair=1.71 us  A(960)=1.58 s
+N= 8 longest L=1016: rep=25.9 min; total 5 reps=2.25 h, 6 reps=2.68 h | L32:off 0.4m/on 0.2m  L128:off 1.2m/on 0.2m  L512:off 4.9m/on 0.6m  L1016:off 11.2m/on 1.2m
+N=12 longest L=1012: rep=34.0 min; total 5 reps=2.93 h, 6 reps=3.49 h | L32:off 0.6m/on 0.2m  L128:off 1.8m/on 0.3m  L512:off 7.1m/on 0.7m  L1012:off 16.1m/on 1.2m
+N=16 longest L=1008: rep=42.2 min; total 5 reps=3.61 h, 6 reps=4.31 h | L32:off 0.8m/on 0.3m  L128:off 2.3m/on 0.4m  L512:off 9.4m/on 0.7m  L1008:off 21.0m/on 1.3m
+N=24 longest L=1000: rep=58.6 min; total 5 reps=4.98 h, 6 reps=5.95 h | L32:off 1.3m/on 0.4m  L128:off 3.5m/on 0.5m  L512:off 13.9m/on 0.9m  L1000:off 30.7m/on 1.4m
+N=32 longest L=992: rep=75.1 min; total 5 reps=6.35 h, 6 reps=7.60 h | L32:off 1.9m/on 0.5m  L128:off 4.8m/on 0.6m  L512:off 18.5m/on 1.0m  L992:off 40.3m/on 1.5m
+cached decode per token ~ 926 ms (12 x RTT = 864 ms); uncached step T=512 ~ 32.5 s, T=1008 ~ 73.4 s, T=1024 ~ 74.8 s

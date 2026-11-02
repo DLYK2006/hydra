@@ -1,0 +1,26 @@
+uncached layer  0 T=960 seq=0 req_bytes=2949147 reply_bytes=2949147 wall_s=5.892
+uncached layer  1 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.573
+uncached layer  2 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.603
+uncached layer  3 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.611
+uncached layer  4 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.549
+uncached layer  5 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.483
+uncached layer  6 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.428
+uncached layer  7 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.533
+uncached layer  8 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.600
+uncached layer  9 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.734
+uncached layer 10 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.501
+uncached layer 11 T=960 seq=0 req_bytes=2949149 reply_bytes=2949149 wall_s=5.582
+uncached TOTAL 12 packets wall_s=68.088
+cached_prefill layer  0 T=960 seq=2635022799589855401 req_bytes=2949157 reply_bytes=2949147 wall_s=5.022
+cached_prefill layer  1 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.927
+cached_prefill layer  2 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.699
+cached_prefill layer  3 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.828
+cached_prefill layer  4 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.652
+cached_prefill layer  5 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.999
+cached_prefill layer  6 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.890
+cached_prefill layer  7 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.717
+cached_prefill layer  8 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.775
+cached_prefill layer  9 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.681
+cached_prefill layer 10 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.852
+cached_prefill layer 11 T=960 seq=2635022799589855401 req_bytes=2949159 reply_bytes=2949149 wall_s=4.714
+cached_prefill TOTAL 12 packets wall_s=58.610

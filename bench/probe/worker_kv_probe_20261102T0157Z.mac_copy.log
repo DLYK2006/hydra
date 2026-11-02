@@ -1,0 +1,80 @@
+Worker mode: block
+Loaded 12 blocks (340217856 bytes)
+KV cache: 75497472 bytes (12 layers x K,V x 1024 x 768 fp32)
+Worker listening on port 50051...
+Received TensorPacket #1 from 'cost-probe' (layer 0), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 0 [960,768]  out[0:4]=[1.25784,0.368284,-16.04,-10.6469] seq=0 start_pos=0 cache_len=0
+Sent response for layer 0 back to orchestrator
+Received TensorPacket #2 from 'cost-probe' (layer 1), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 1 [960,768]  out[0:4]=[1.87816,1.23415,-12.7368,-9.74091] seq=0 start_pos=0 cache_len=0
+Sent response for layer 1 back to orchestrator
+Received TensorPacket #3 from 'cost-probe' (layer 2), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 2 [960,768]  out[0:4]=[2.16021,0.915234,-13.4694,-10.2427] seq=0 start_pos=0 cache_len=0
+Sent response for layer 2 back to orchestrator
+Received TensorPacket #4 from 'cost-probe' (layer 3), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 3 [960,768]  out[0:4]=[2.17169,0.992515,-13.1594,-10.0589] seq=0 start_pos=0 cache_len=0
+Sent response for layer 3 back to orchestrator
+Received TensorPacket #5 from 'cost-probe' (layer 4), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 4 [960,768]  out[0:4]=[1.78133,0.670767,-12.8494,-9.85679] seq=0 start_pos=0 cache_len=0
+Sent response for layer 4 back to orchestrator
+Received TensorPacket #6 from 'cost-probe' (layer 5), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 5 [960,768]  out[0:4]=[1.99171,0.959642,-12.3841,-9.69356] seq=0 start_pos=0 cache_len=0
+Sent response for layer 5 back to orchestrator
+Received TensorPacket #7 from 'cost-probe' (layer 6), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 6 [960,768]  out[0:4]=[1.88075,0.632342,-12.2022,-9.66861] seq=0 start_pos=0 cache_len=0
+Sent response for layer 6 back to orchestrator
+Received TensorPacket #8 from 'cost-probe' (layer 7), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 7 [960,768]  out[0:4]=[1.76173,0.706938,-12.5223,-9.49861] seq=0 start_pos=0 cache_len=0
+Sent response for layer 7 back to orchestrator
+Received TensorPacket #9 from 'cost-probe' (layer 8), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 8 [960,768]  out[0:4]=[1.89456,0.505291,-11.8746,-9.62022] seq=0 start_pos=0 cache_len=0
+Sent response for layer 8 back to orchestrator
+Received TensorPacket #10 from 'cost-probe' (layer 9), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 9 [960,768]  out[0:4]=[1.91792,0.547397,-12.3117,-9.90782] seq=0 start_pos=0 cache_len=0
+Sent response for layer 9 back to orchestrator
+Received TensorPacket #11 from 'cost-probe' (layer 10), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 10 [960,768]  out[0:4]=[1.90722,0.932901,-13.1354,-9.91293] seq=0 start_pos=0 cache_len=0
+Sent response for layer 10 back to orchestrator
+Received TensorPacket #12 from 'cost-probe' (layer 11), 737280 floats, shape [960,768] seq=0 start_pos=0
+Computed block layer 11 [960,768]  out[0:4]=[-0.351145,-3.51144,-17.4094,-4.8009] seq=0 start_pos=0 cache_len=0
+Sent response for layer 11 back to orchestrator
+Connection closed (12 packet(s) processed). Waiting for next connection...
+Received TensorPacket #1 from 'cost-probe' (layer 0), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+KV cache reset for sequence 2635022799589855401
+Computed block layer 0 [960,768]  out[0:4]=[1.25784,0.368284,-16.04,-10.6469] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 0 back to orchestrator
+Received TensorPacket #2 from 'cost-probe' (layer 1), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 1 [960,768]  out[0:4]=[1.87816,1.23415,-12.7368,-9.74091] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 1 back to orchestrator
+Received TensorPacket #3 from 'cost-probe' (layer 2), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 2 [960,768]  out[0:4]=[2.16021,0.915234,-13.4694,-10.2427] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 2 back to orchestrator
+Received TensorPacket #4 from 'cost-probe' (layer 3), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 3 [960,768]  out[0:4]=[2.17169,0.992515,-13.1594,-10.0589] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 3 back to orchestrator
+Received TensorPacket #5 from 'cost-probe' (layer 4), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 4 [960,768]  out[0:4]=[1.78133,0.670767,-12.8494,-9.85679] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 4 back to orchestrator
+Received TensorPacket #6 from 'cost-probe' (layer 5), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 5 [960,768]  out[0:4]=[1.99171,0.959642,-12.3841,-9.69356] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 5 back to orchestrator
+Received TensorPacket #7 from 'cost-probe' (layer 6), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 6 [960,768]  out[0:4]=[1.88075,0.632342,-12.2022,-9.66861] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 6 back to orchestrator
+Received TensorPacket #8 from 'cost-probe' (layer 7), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 7 [960,768]  out[0:4]=[1.76173,0.706938,-12.5223,-9.49861] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 7 back to orchestrator
+Received TensorPacket #9 from 'cost-probe' (layer 8), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 8 [960,768]  out[0:4]=[1.89456,0.505291,-11.8746,-9.62022] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 8 back to orchestrator
+Received TensorPacket #10 from 'cost-probe' (layer 9), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 9 [960,768]  out[0:4]=[1.91792,0.547397,-12.3117,-9.90782] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 9 back to orchestrator
+Received TensorPacket #11 from 'cost-probe' (layer 10), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 10 [960,768]  out[0:4]=[1.90722,0.932901,-13.1354,-9.91293] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 10 back to orchestrator
+Received TensorPacket #12 from 'cost-probe' (layer 11), 737280 floats, shape [960,768] seq=2635022799589855401 start_pos=0
+Computed block layer 11 [960,768]  out[0:4]=[-0.351145,-3.51144,-17.4094,-4.8009] seq=2635022799589855401 start_pos=0 cache_len=960
+Sent response for layer 11 back to orchestrator
+Connection closed (12 packet(s) processed). Waiting for next connection...
+Shutdown signal received, no longer accepting connections.

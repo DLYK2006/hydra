@@ -1,0 +1,8 @@
+2026-11-02T02:34:29Z
+machdep.cpu.brand_string: Intel(R) Core(TM) i5-8257U CPU @ 1.40GHz
+hw.ncpu: 8
+hw.physicalcpu: 4
+hw.memsize: 8589934592
+ProductName:		macOS
+ProductVersion:		14.8.7
+BuildVersion:		23J520

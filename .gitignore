@@ -58,3 +58,7 @@ floatSum
 .claude/*
 !.claude/agents/
 *nano*
+# Benchmark raw outputs (per-batch logs, run data, worker-log copies): local only, hashed
+# in bench/raw/<BATCH>/SHA256SUMS; results.csv / RESULTS.md are generated from them.
+bench/raw/
+!bench/probe/*.log

@@ -1,0 +1,1 @@
+model: L=32 N=12 off=36.91 s on=13.51 s pair=50.42 s (step walls only, no process startup)

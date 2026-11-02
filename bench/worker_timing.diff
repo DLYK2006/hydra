@@ -1,0 +1,43 @@
+# APPLIED in commit b16f4e8 (this file is the exact diff). Logging only: adds <chrono>, one steady_clock stamp after a successful
+# parse, compute_us taken just before the generic sendPacket, and one TIMING line after the send.
+# Not timed: error replies (they continue before the generic send) and --mode mlp's two-packet
+# path. Check: git apply --check bench/worker_timing.diff (clean on b7d24cb); patched file passes
+# g++ -std=c++17 -O2 -Wall -Wextra -fsyntax-only with zero warnings (WSL2).
+--- a/worker.cpp	2026-11-01 21:12:21.758870900 -0500
++++ b/worker.cpp	2026-11-01 21:12:21.881939600 -0500
+@@ -14,6 +14,7 @@
+ #include <string>
+ #include <vector>
+ #include <algorithm>
++#include <chrono>
+ #include <fstream>
+ 
+ #include "hydra.pb.h"
+@@ -596,6 +597,7 @@
+                 connection_ok = false;
+                 break;
+             }
++            const auto t_parsed = std::chrono::steady_clock::now();   // bench: compute window start
+ 
+             packets_received++;
+             std::cout << "Received TensorPacket #" << packets_received << " from '"
+@@ -1117,6 +1119,8 @@
+                 break;
+             }
+ 
++            const long long compute_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - t_parsed).count();   // bench: window end
+             if (!sendPacket(new_socket, response_serialized)) {
+                 std::cout << "Failed to send response: " << strerror(errno) << std::endl;
+                 connection_ok = false;
+@@ -1125,6 +1129,10 @@
+ 
+             std::cout << "Sent response for layer " << packet.layer_index()
+                       << " back to orchestrator" << std::endl;
++            std::cout << "TIMING dev=" << packet.device_id() << " layer=" << packet.layer_index()
++                      << " T=" << (packet.shape_size() > 0 ? packet.shape(0) : -1)
++                      << " seq=" << packet.sequence_id() << " start_pos=" << packet.start_pos()
++                      << " compute_us=" << compute_us << std::endl;
+         }
+ 
+         close(new_socket);

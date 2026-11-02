@@ -1,0 +1,12 @@
+2026-11-02T02:34:27Z
+CPU(s):                               32
+Model name:                           AMD Ryzen 9 7945HX with Radeon Graphics
+Thread(s) per core:                   2
+Core(s) per socket:                   16
+Socket(s):                            1
+               total        used        free      shared  buff/cache   available
+Mem:      7904301056   733605888  6675570688     3747840   666685440  7170695168
+Swap:     2147483648           0  2147483648
+Linux storms-rig 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
