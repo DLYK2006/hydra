@@ -232,6 +232,58 @@ void attn_heads(const float* qkv, float* out,
     }
 }
 
+// KV cache: attention for T_new new rows at absolute positions start_pos ..
+// start_pos+T_new-1, reading K/V for keys 0..p from the per-layer cache (which
+// already holds the new rows). Kc, Vc: [KV_CAPACITY, H] row-major.
+//
+// Same per-row arithmetic as attn_heads(), in the same order: scores for keys
+// 0..p ascending (double dot over d ascending, times scale); max from key 0;
+// exp and sum ascending; divide; V accumulation ascending; one float cast.
+// attn_heads() also visits the masked keys kt > p, but with score -1e9 they
+// contribute exp() == 0.0 exactly to the sum and 0.0*V to the accumulator,
+// which leaves both bitwise unchanged -- so skipping them here is bit-exact
+// against the full recompute (verified by scripts/kv_check.sh gates B/C).
+void attn_heads_cached(const float* qkv_new, int T_new, int start_pos,
+                       const float* Kc, const float* Vc, float* out,
+                       int n_heads, int head_dim) {
+    int H = n_heads * head_dim;
+    double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
+
+    std::vector<double> scores(static_cast<size_t>(start_pos) + T_new);
+    std::vector<double> acc(static_cast<size_t>(head_dim));
+
+    for (int h = 0; h < n_heads; h++) {
+        for (int i = 0; i < T_new; i++) {
+            const int p = start_pos + i;   // this query row's absolute position
+            const float* Q_h = qkv_new + i * (3 * H) + h * head_dim;
+            for (int kt = 0; kt <= p; kt++) {
+                const float* K_h = Kc + static_cast<size_t>(kt) * H + h * head_dim;
+                double dot = 0.0;
+                for (int d = 0; d < head_dim; d++)
+                    dot += static_cast<double>(Q_h[d]) * static_cast<double>(K_h[d]);
+                scores[kt] = dot * scale;
+            }
+
+            double mx = scores[0];
+            for (int kt = 1; kt <= p; kt++) if (scores[kt] > mx) mx = scores[kt];
+            double sum = 0.0;
+            for (int kt = 0; kt <= p; kt++) { scores[kt] = std::exp(scores[kt] - mx); sum += scores[kt]; }
+            for (int kt = 0; kt <= p; kt++) scores[kt] /= sum;
+
+            float* out_h = out + i * H + h * head_dim;
+            for (int d = 0; d < head_dim; d++) acc[d] = 0.0;
+            for (int kt = 0; kt <= p; kt++) {
+                const float* V_h = Vc + static_cast<size_t>(kt) * H + h * head_dim;
+                double w = scores[kt];
+                for (int d = 0; d < head_dim; d++)
+                    acc[d] += w * static_cast<double>(V_h[d]);
+            }
+            for (int d = 0; d < head_dim; d++)
+                out_h[d] = static_cast<float>(acc[d]);
+        }
+    }
+}
+
 // GELU with tanh approximation (GPT-2 variant):
 //   gelu(x) = 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
 // Must match PyTorch's F.gelu(x, approximate='tanh') -- NOT the default erf
@@ -270,6 +322,9 @@ constexpr int N_BLOCKS = 12;
 // 4-byte length prefix makes the worker try a ~4 GiB allocation.
 constexpr uint32_t MAX_MSG_LEN = 4u << 20;  // 4 MiB
 
+// KV cache (block mode): positions per sequence (GPT-2 n_ctx).
+constexpr int KV_CAPACITY = 1024;
+
 // G3: one GPT-2 block's weights, loaded from data/h{NN}_<name>.bin (written by
 // extract_gpt2_all_blocks.py; Conv1D matrices are [in, out] row-major).
 struct BlockWeights {
@@ -279,6 +334,16 @@ struct BlockWeights {
     std::vector<float> ln2_gamma, ln2_beta;       // [HIDDEN_DIM]
     std::vector<float> c_fc_W, c_fc_b;            // [HIDDEN_DIM x MLP_HIDDEN_DIM], [MLP_HIDDEN_DIM]
     std::vector<float> mlp_proj_W, mlp_proj_b;    // [MLP_HIDDEN_DIM x HIDDEN_DIM], [HIDDEN_DIM]
+};
+
+// KV cache: one active sequence. Per layer, K and V rows for positions
+// 0..len[L]-1, exactly the float32 values matmul_nt wrote into qkv_buf
+// columns [H, 2H) and [2H, 3H). Allocated once at startup in block mode:
+// 12 layers x 2 x 1024 x 768 x 4 B = 75,497,472 B.
+struct KVCache {
+    std::vector<float> K[N_BLOCKS], V[N_BLOCKS];   // [KV_CAPACITY x HIDDEN_DIM] each
+    int len[N_BLOCKS] = {0};
+    uint64_t seq = 0;                              // 0 = no active sequence
 };
 
 // Hardening milestone: minimal graceful shutdown. SIGINT/SIGTERM set this
@@ -343,6 +408,7 @@ int main(int argc, char* argv[]) {
     std::vector<float> mlp_c_proj_W; // mlp mode: c_proj W[MLP_HIDDEN_DIM x HIDDEN_DIM], [in, out]
     std::vector<float> mlp_c_proj_b; // mlp mode: c_proj bias [HIDDEN_DIM]
     std::vector<BlockWeights> blocks; // block mode: all N_BLOCKS blocks, indexed by layer_index
+    KVCache kv;                       // block mode: KV cache for sequence_id != 0
 
     if (mode == "linear") {
         if (!loadFloatsFromFile("data/layer0_weights.bin",
@@ -434,6 +500,14 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "Loaded " << N_BLOCKS << " blocks (" << total_bytes << " bytes)"
                   << std::endl;
+        size_t kv_bytes = 0;
+        for (int n = 0; n < N_BLOCKS; n++) {
+            kv.K[n].assign(static_cast<size_t>(KV_CAPACITY) * HIDDEN_DIM, 0.0f);
+            kv.V[n].assign(static_cast<size_t>(KV_CAPACITY) * HIDDEN_DIM, 0.0f);
+            kv_bytes += (kv.K[n].size() + kv.V[n].size()) * sizeof(float);
+        }
+        std::cout << "KV cache: " << kv_bytes << " bytes (" << N_BLOCKS << " layers x K,V x "
+                  << KV_CAPACITY << " x " << HIDDEN_DIM << " fp32)" << std::endl;
     }
 
     int server_fd;
@@ -531,7 +605,8 @@ int main(int argc, char* argv[]) {
                 std::cout << packet.shape(i)
                           << (i + 1 < packet.shape_size() ? "," : "");
             }
-            std::cout << "]" << std::endl;
+            std::cout << "] seq=" << packet.sequence_id()
+                      << " start_pos=" << packet.start_pos() << std::endl;
 
             hydra::TensorPacket response;
             response.set_layer_index(packet.layer_index());
@@ -806,6 +881,62 @@ int main(int argc, char* argv[]) {
                 }
                 const BlockWeights& w = blocks[L];
 
+                // KV cache (sequence_id != 0). Every check runs before any cache
+                // state changes; every rejection sends the no-shape error reply and
+                // keeps the connection (the sequence_id == 0 path below is unchanged:
+                // its shape/size errors still close the connection). Sizes in int64.
+                const uint64_t seq = packet.sequence_id();
+                const bool cached = (seq != 0);
+                const int start_pos = packet.start_pos();
+                if (cached) {
+                    std::string why;
+                    bool new_seq = false;
+                    const int64_t T64 = (packet.shape_size() == 2) ? packet.shape(0) : -1;
+                    if (packet.shape_size() != 2 || packet.shape(1) != HIDDEN_DIM) {
+                        why = "KV shape: need [T," + std::to_string(HIDDEN_DIM) + "]";
+                    } else if (T64 < 1 || T64 > KV_CAPACITY) {
+                        why = "KV shape: T=" + std::to_string(T64) + " outside [1, "
+                              + std::to_string(KV_CAPACITY) + "]";
+                    } else if (static_cast<int64_t>(packet.data_size()) != T64 * HIDDEN_DIM) {
+                        why = "KV size: data_size=" + std::to_string(packet.data_size())
+                              + " != T*H=" + std::to_string(T64 * HIDDEN_DIM);
+                    } else if (start_pos < 0 || static_cast<int64_t>(start_pos) + T64 > KV_CAPACITY) {
+                        why = "KV bounds: start_pos=" + std::to_string(start_pos) + " T="
+                              + std::to_string(T64) + " capacity " + std::to_string(KV_CAPACITY);
+                    } else {
+                        new_seq = (seq != kv.seq);
+                        const int cur_len = new_seq ? 0 : kv.len[L];
+                        if (new_seq && start_pos != 0) {
+                            why = "KV sequence: new sequence " + std::to_string(seq)
+                                  + " must start at start_pos 0, got " + std::to_string(start_pos);
+                        } else if (start_pos != cur_len) {
+                            why = "KV alignment: start_pos " + std::to_string(start_pos)
+                                  + " != cached length " + std::to_string(cur_len)
+                                  + " (layer " + std::to_string(L) + ")";
+                        }
+                    }
+                    if (!why.empty()) {
+                        std::cout << "Rejecting packet: " << why << "; sending error reply" << std::endl;
+                        std::string err_serialized;
+                        if (!response.SerializeToString(&err_serialized)) {
+                            std::cout << "Failed to serialize error reply" << std::endl;
+                            connection_ok = false;
+                            break;
+                        }
+                        if (!sendPacket(new_socket, err_serialized)) {
+                            std::cout << "Failed to send error reply: " << strerror(errno) << std::endl;
+                            connection_ok = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    if (new_seq) {   // all checks passed: now (and only now) reset
+                        kv.seq = seq;
+                        std::fill(kv.len, kv.len + N_BLOCKS, 0);
+                        std::cout << "KV cache reset for sequence " << seq << std::endl;
+                    }
+                }
+
                 if (packet.shape_size() != 2) {
                     std::cout << "Rejecting packet: block mode requires shape_size=2"
                               << ", got shape_size=" << packet.shape_size() << std::endl;
@@ -850,8 +981,23 @@ int main(int argc, char* argv[]) {
 
                 // Step 1c: multi-head causal attention  [T,2304] -> [T,768]
                 std::vector<float> attn_out(elems);
-                attn_heads(qkv_buf.data(), attn_out.data(),
-                           pkt_T, ATTN_N_HEAD, ATTN_HEAD_DIM);
+                if (cached) {
+                    // Append this packet's K and V rows at start_pos.., then attend
+                    // over keys 0..p from the cache.
+                    for (int t = 0; t < pkt_T; t++) {
+                        const float* row = qkv_buf.data() + static_cast<size_t>(t) * QKV_OUT_DIM;
+                        const size_t dst = (static_cast<size_t>(start_pos) + t) * HIDDEN_DIM;
+                        std::copy(row + HIDDEN_DIM, row + 2 * HIDDEN_DIM, kv.K[L].begin() + dst);
+                        std::copy(row + 2 * HIDDEN_DIM, row + 3 * HIDDEN_DIM, kv.V[L].begin() + dst);
+                    }
+                    kv.len[L] = start_pos + pkt_T;
+                    attn_heads_cached(qkv_buf.data(), pkt_T, start_pos,
+                                      kv.K[L].data(), kv.V[L].data(), attn_out.data(),
+                                      ATTN_N_HEAD, ATTN_HEAD_DIM);
+                } else {
+                    attn_heads(qkv_buf.data(), attn_out.data(),
+                               pkt_T, ATTN_N_HEAD, ATTN_HEAD_DIM);
+                }
 
                 // Step 1d: c_proj  [T,768] -> [T,768]
                 std::vector<float> attn_proj(elems);
@@ -891,7 +1037,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "Computed block layer " << L << " [" << pkt_T << "," << HIDDEN_DIM
                           << "]  out[0:4]=["
                           << x[0] << "," << x[1] << "," << x[2] << "," << x[3]
-                          << "]" << std::endl;
+                          << "] seq=" << seq << " start_pos=" << start_pos
+                          << " cache_len=" << (cached ? kv.len[L] : 0) << std::endl;
 
                 for (float v : x) response.add_data(v);
                 response.add_shape(pkt_T);

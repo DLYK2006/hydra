@@ -8,4 +8,6 @@ message TensorPacket {
     repeated float data = 2;     // The actual hidden state vector (activations)
     string device_id = 3;        // The ID of the device sending the data
     repeated int32 shape = 4;    // Logical dimensions of `data`, e.g. [4] for a length-4 vector
+    uint64 sequence_id = 5;      // KV cache: 0 = no cache (stateless, pre-KV behaviour); != 0 = cached sequence
+    int32 start_pos = 6;         // KV cache: absolute position of data's first row within the sequence
 }
