@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 
 #include "hydra.pb.h"
@@ -596,6 +597,7 @@ int main(int argc, char* argv[]) {
                 connection_ok = false;
                 break;
             }
+            const auto t_parsed = std::chrono::steady_clock::now();   // bench: compute window start
 
             packets_received++;
             std::cout << "Received TensorPacket #" << packets_received << " from '"
@@ -1117,6 +1119,8 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
+            const long long compute_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t_parsed).count();   // bench: window end
             if (!sendPacket(new_socket, response_serialized)) {
                 std::cout << "Failed to send response: " << strerror(errno) << std::endl;
                 connection_ok = false;
@@ -1125,6 +1129,10 @@ int main(int argc, char* argv[]) {
 
             std::cout << "Sent response for layer " << packet.layer_index()
                       << " back to orchestrator" << std::endl;
+            std::cout << "TIMING dev=" << packet.device_id() << " layer=" << packet.layer_index()
+                      << " T=" << (packet.shape_size() > 0 ? packet.shape(0) : -1)
+                      << " seq=" << packet.sequence_id() << " start_pos=" << packet.start_pos()
+                      << " compute_us=" << compute_us << std::endl;
         }
 
         close(new_socket);
