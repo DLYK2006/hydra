@@ -1,7 +1,8 @@
 # ── Generated weight / data blobs ───────────────────────────────
 # These are regenerated locally by the extraction scripts in this repo.
-# Weights are large and must never be committed. The small frozen oracles
-# below (each <= 96 KiB) are tracked instead.
+# Weights are large and must never be committed. The frozen oracles below are
+# tracked instead (the M1-M6/G3 ones are <= 96 KiB each; the G5 hidden-state
+# oracle is 1.26 MB and the frozen G5 logits 8.04 MB).
 data/*.bin
 # Inputs + expected outputs: what compare_*.py diff against.
 !data/*_input_T*.bin
@@ -10,6 +11,10 @@ data/*.bin
 !data/expected_y.bin
 # June 2026 worker responses: regression oracles (live runs must cmp-identical).
 !data/*_response_*.bin
+# G5 oracles: chained-mirror block-11 hidden states and the frozen Hydra logits
+# (tracked: git is the only off-machine copy).
+!data/g5_mirror_hidden.bin
+!data/g5_hydra_logits.bin
 data/live/
 data/MNIST/
 
@@ -25,6 +30,7 @@ a.out
 # (different protobuf versions produce incompatible generated code).
 hydra.pb.h
 hydra.pb.cc
+hydra_pb2.py
 
 # ── Python ──────────────────────────────────────────────────────
 __pycache__/
