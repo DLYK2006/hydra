@@ -2,8 +2,16 @@
 """
 gen_hydra.py  --  G4: greedy GPT-2 generation through the Hydra Mac worker.
 
-Usage (from repo root, Windows Python; the Mac worker runs the G3 build in --mode block):
+Usage (from repo root, Windows Python; the Mac worker runs the G3/KV build in --mode block):
   python gen_hydra.py --out DIR [--host 10.0.0.62] [--port 50051] [--timeout 10]
+                      [--kv-cache on|off] [--n-gen 20] [--prompt TEXT]
+
+--kv-cache off (default): exactly the G4 client below (no sequence_id; same wire bytes,
+  arithmetic and outputs). --kv-cache on: one random nonzero sequence_id per run; step 0
+  prefills the whole prompt (start_pos 0), every later step sends ONE row,
+  wte[last token] + wpe[p] at start_pos p = T_prompt + step - 1; the worker attends over its
+  cache. The head runs on the newest row only, and hidden_f32.bin holds only the rows the
+  worker returned (T_prompt prefill rows, then one row per later step).
 
 Writes, only after all N_GEN steps succeed (nothing on any failure):
   DIR/tokens.txt     -- one row per step, same row format as data/gen_ref_tokens.txt
@@ -13,6 +21,7 @@ Writes, only after all N_GEN steps succeed (nothing on any failure):
                         the input to ln_f), steps concatenated: 410 x 768 for the
                         fixed prompt (T = 11..30); compared byte-for-byte with
                         data/g5_mirror_hidden.bin by scripts/g5_compare_hidden.py
+  DIR/sends.txt      -- one line per packet sent: "step layer sequence_id start_pos T"
 Refuses to run if any output exists.
 
 Per generation step (no KV cache; the full context is resent every step):
@@ -40,6 +49,7 @@ TCP_NODELAY is set (Engineering Standards).
 
 import argparse
 import os
+import secrets
 import socket
 import struct
 import sys
@@ -90,16 +100,22 @@ def recv_packet(sock):
     return pkt
 
 
-def run_blocks(x, host, port, timeout):
-    """Send x [T, 768] float32 through blocks 0..11 on one connection; return the output."""
+def run_blocks(x, host, port, timeout, sends, seq=0, start_pos=0):
+    """Send x [T, 768] float32 through blocks 0..11 on one connection; return the output.
+    seq != 0: KV-cached sequence, x holds positions start_pos.. . Appends one
+    (layer, sequence_id, start_pos, T) tuple per packet sent to `sends`."""
     T = x.shape[0]
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         for n in range(N_BLOCKS):
             pkt = hydra_pb2.TensorPacket(layer_index=n, device_id=DEVICE_ID)
+            if seq:   # unset when 0, so the cache-off wire bytes are unchanged
+                pkt.sequence_id = seq
+                pkt.start_pos = start_pos
             pkt.data.extend(x.reshape(-1).tolist())    # float32 -> Python float: exact
             pkt.shape.extend([T, HIDDEN])
             send_packet(s, pkt)
+            sends.append((pkt.layer_index, pkt.sequence_id, pkt.start_pos, pkt.shape[0]))
             r = recv_packet(s)
             if len(r.shape) == 0:
                 raise RuntimeError(f"worker rejected layer_index {r.layer_index}")
@@ -118,12 +134,17 @@ def main():
     ap.add_argument("--host", default="10.0.0.62")   # Mac worker, as in orchestrator.cpp:255
     ap.add_argument("--port", type=int, default=50051)
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--kv-cache", choices=["on", "off"], default="off")
+    ap.add_argument("--n-gen", type=int, default=N_GEN)
+    ap.add_argument("--prompt", default=PROMPT)
     a = ap.parse_args()
+    cache = a.kv_cache == "on"
 
     tok_path = os.path.join(a.out, "tokens.txt")
     log_path = os.path.join(a.out, "logits_f64.bin")
     hid_path = os.path.join(a.out, "hidden_f32.bin")
-    for p in (tok_path, log_path, hid_path):
+    snd_path = os.path.join(a.out, "sends.txt")
+    for p in (tok_path, log_path, hid_path, snd_path):
         if os.path.exists(p):
             sys.exit(f"ERROR: {p} exists; refusing to overwrite")
     os.makedirs(a.out, exist_ok=True)
@@ -136,17 +157,27 @@ def main():
                          weight=model.ln_f.weight.double(), bias=model.ln_f.bias.double())
         return x @ model.wte.weight.double().T
 
-    prompt_ids = tokenizer.encode(PROMPT)
-    tokens, rows, hidden = [], [], []
+    prompt_ids = tokenizer.encode(a.prompt)
+    seq = (secrets.randbits(63) | 1) if cache else 0   # nonzero; fresh per run
+    tokens, rows, hidden, sends = [], [], [], []
     with torch.no_grad():
-        for step in range(N_GEN):
-            ids = torch.tensor([prompt_ids + tokens], dtype=torch.long)
+        for step in range(a.n_gen):
+            if cache and step > 0:   # decode: only the newest token, at its absolute position
+                start = len(prompt_ids) + step - 1
+                ids = torch.tensor([[tokens[-1]]], dtype=torch.long)
+                pos = torch.tensor([[start]], dtype=torch.long)
+            else:                    # cache off, or the cache-on prefill: the whole context
+                start = 0
+                ids = torch.tensor([prompt_ids + tokens], dtype=torch.long)
+                pos = torch.arange(ids.shape[1], dtype=torch.long).unsqueeze(0)
             T = ids.shape[1]
-            pos = torch.arange(T, dtype=torch.long).unsqueeze(0)
             x = (model.wte(ids) + model.wpe(pos)).squeeze(0).float()
-            x = run_blocks(x, a.host, a.port, a.timeout)
+            n0 = len(sends)
+            x = run_blocks(x, a.host, a.port, a.timeout, sends, seq, start)
+            sends[n0:] = [(step,) + t for t in sends[n0:]]
             hidden.append(x.numpy().astype(np.float32))   # block-11 output, [T, 768]
-            logits = head_f64(x)[-1]                      # [50257] float64
+            # cache on: head on the newest row only (owner decision; bounded in kv_compare.py)
+            logits = head_f64(x[-1:] if cache else x)[-1]   # [50257] float64
             tid = int(logits.argmax())
             tokens.append(tid)
             rows.append(logits)
@@ -156,10 +187,13 @@ def main():
     np.concatenate(hidden, axis=0).astype(np.float32).tofile(hid_path)
     with open(tok_path, "w", newline="\n") as f:
         f.write("# Hydra greedy tokens -- gen_hydra.py (blocks on the Mac worker)\n")
-        f.write(f"# PROMPT = {PROMPT!r}\n# N_GEN  = {N_GEN}\n# step  token_id  decoded\n")
+        f.write(f"# PROMPT = {a.prompt!r}\n# N_GEN  = {a.n_gen}\n# step  token_id  decoded\n")
         for step, tid in enumerate(tokens):
             f.write(f"{step:4d}  {tid:7d}  {repr(tokenizer.decode([tid]))}\n")
-    print(f"Wrote {tok_path}, {log_path} and {hid_path}")
+    with open(snd_path, "w", newline="\n") as f:
+        f.write("# step layer sequence_id start_pos T\n")
+        f.writelines(" ".join(map(str, t)) + "\n" for t in sends)
+    print(f"Wrote {tok_path}, {log_path}, {hid_path} and {snd_path}")
 
 
 if __name__ == "__main__":
