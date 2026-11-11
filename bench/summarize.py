@@ -31,10 +31,13 @@
 #   W4 tokens identical between the on and off run of the same (rep, prompt_len);
 #   W5 every scheduled run completed exactly once, and the order of matrix.log "done" lines ==
 #      schedule.csv order (aborted, renamed attempts are allowed and ignored);
-#   W6 anchor_on and anchor_off tokens == data/gen_ref_tokens.txt.
+#   W6 anchor_on and anchor_off tokens == data/gen_ref_tokens.txt;
+#   W7 the generated Machines/RTT/Profiler sections have their sources: exactly 3 specs_*.txt,
+#      >= 1 profile/*.sample.log (profile.sh, after the matrix) and "ping " lines in matrix.log.
 import argparse
 import csv
 import filecmp
+import glob
 import hashlib
 import json
 import os
@@ -166,6 +169,12 @@ def build(out_dir):
             fail.append(f"W4 {r['run_id']}: tokens differ from its on/off pair (check top-2 margin first)")
     if fail:
         stop(fail)
+    specs = sorted(glob.glob(f"{RAW}/specs_*.txt"))
+    profs = sorted(glob.glob(f"{RAW}/profile/*.sample.log"))
+    pings = [l.strip() for l in open(f"{RAW}/matrix.log") if l.startswith("ping ")]
+    if len(specs) != 3 or not profs or not pings:
+        stop([f"W7 need 3 specs_*.txt, >=1 profile/*.sample.log and ping lines in matrix.log "
+              f"(have {len(specs)}, {len(profs)}, {len(pings)})"])
 
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "results.csv"), "w", newline="") as f:
@@ -198,6 +207,40 @@ def build(out_dir):
         f1 = [r["decode_mean_ms"] for r in out if (r["prompt_len"], r["kv_cache"], r["pair_position"]) == (L, mode, 1)]
         f2 = [r["decode_mean_ms"] for r in out if (r["prompt_len"], r["kv_cache"], r["pair_position"]) == (L, mode, 2)]
         md.append(f"| {L} | {mode} | {len(f1)}, {g3(stx.median(f1)) if f1 else '-'} | {len(f2)}, {g3(stx.median(f2)) if f2 else '-'} |")
+    # Speedup = off/on pooled mean step time (= on/off tokens/s). Saved time splits exactly into
+    # worker + net+client, since net+client is defined as step wall - worker.
+    md += ["", "## Decode speedup, cache on vs off (pooled means over every decode step in the cell)", "",
+           "| prompt | off ms/token | on ms/token | speedup x | saved ms/token | saved in worker compute ms | % | saved in net+client ms | % |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    mm = lambda xs: stx.mean(xs) / 1e3
+    for L in sorted({c[0] for c in cells}):
+        off, on = pooled[(L, "off")], pooled[(L, "on")]
+        sv, sw, sn = mm(off[0]) - mm(on[0]), mm(off[1]) - mm(on[1]), mm(off[2]) - mm(on[2])
+        md.append(f"| {L} | {g3(mm(off[0]))} | {g3(mm(on[0]))} | {g3(mm(off[0]) / mm(on[0]))} | {g3(sv)} | "
+                  f"{g3(sw)} | {g3(100 * sw / sv)} | {g3(sn)} | {g3(100 * sn / sv)} |")
+    avgs = [float(l.split("=")[1].split("/")[1]) for l in pings]
+    md += ["", f"## RTT WSL2 -> Mac (`ping -c 20` before/after every rep; verbatim from matrix.log)", "", "```"] + pings + \
+          ["```", "", f"Median of the {len(avgs)} per-ping-run avg RTTs: {g3(stx.median(avgs))} ms "
+                      f"(range {g3(min(avgs))}-{g3(max(avgs))} ms).",
+           "", "## Machines (verbatim from specs_*.txt, blank lines dropped)", ""]
+    for p in specs:
+        md += [f"`{os.path.basename(p)}`:", "", "```"] + \
+              [l.rstrip() for l in open(p, encoding="utf-8", errors="replace") if l.strip()] + ["```", ""]
+    md += ["## Profiler: top 5 by self time (macOS `sample`, 10 s at 1 ms; separate worker after the matrix, "
+           "never timed)", ""]
+    for p in profs:
+        sec, on_ = [], False
+        for l in open(p, encoding="utf-8", errors="replace"):
+            if l.startswith("Sort by top of stack"):
+                on_ = True
+            elif on_ and not l.strip():
+                break
+            elif on_:
+                sec.append(l.strip().rsplit(None, 1))
+        tot = sum(int(c) for _, c in sec)
+        md += [f"`profile/{os.path.basename(p)}`: share of the {tot} samples listed in its top-of-stack "
+               "section (entries with >= 5 samples)", "", "| function | samples | share % |", "|---|---|---|"]
+        md += [f"| `{fn}` | {c} | {g3(100 * int(c) / tot)} |" for fn, c in sec[:5]] + [""]
     md += ["", MARK, "", "(hand-written after review; every number must appear in the tables above "
            "or in results.csv — enforced by --verify)", ""]
     with open(os.path.join(out_dir, "RESULTS.md"), "w", newline="\n", encoding="utf-8") as f:   # not cp1252

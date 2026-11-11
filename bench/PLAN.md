@@ -164,7 +164,8 @@ Recorded by `bench_matrix.sh` into `bench/raw/BATCH/specs_*.txt`, and once stand
 - RTT: `ping -c 20 10.0.0.62`, full output with a UTC stamp, before and after every rep, into
   `ping_<tag>_<UTC>.txt`. Files are never overwritten across resumes.
 
-## 6. Profiler (`bench/profile.sh`), after the matrix; never summarized
+## 6. Profiler (`bench/profile.sh`), after the matrix; never part of the timing results
+(`summarize.py` only lists each sample log's top 5, W7)
 - Existence check (approved): `ssh $M "ls -l /usr/bin/sample; sample 2>&1 | head -15"`.
 - `bash bench/profile.sh BATCH <PID> off512 off 2`, then `bash bench/profile.sh BATCH <PID> on512 on 24`.
   It refuses if any `bench/raw/BATCH/profile/<label>*` exists.
@@ -180,7 +181,7 @@ Recorded by `bench_matrix.sh` into `bench/raw/BATCH/specs_*.txt`, and once stand
   - [Likely] cached: blocked in `recv`/`accept`.
   - Caveat: `-O2` inlining may fold small functions into `main`.
 
-## 7. Outputs and traceability (`summarize.py`; checks W0-W6)
+## 7. Outputs and traceability (`summarize.py`; checks W0-W7)
 - **W0:** every raw file matches `SHA256SUMS`, and `matrix.log` matches `matrix.log.sha256`.
   It stops before parsing anything.
 - **W1:** the worker log copy equals the Mac's `shasum`.

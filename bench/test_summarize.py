@@ -1,5 +1,5 @@
 # Offline test of bench/summarize.py on fabricated raw batches (no worker, no network).
-# Positive cases must pass; every negative case must fail WITH THE EXPECTED CHECK (W0..W6).
+# Positive cases must pass; every negative case must fail WITH THE EXPECTED CHECK (W0..W7).
 # Usage: /mnt/c/Users/ASUS/AppData/Local/Programs/Python/Python313/python.exe bench/test_summarize.py
 import hashlib, json, os, shutil, subprocess, sys, tempfile
 
@@ -31,7 +31,10 @@ def make(root, tamper=None):
             first = "on" if (r + L) % 4 == 0 else "off"
             for m in (first, "off" if first == "on" else "on"):
                 sched.append((f"r{r}_L{L}_{m}", str(r), m, f"bench/prompts/prompt_L{L}.txt", N))
-    wlog, mlog = ["Worker listening on port 50051..."], ["2026-11-02T00:00:00Z BEGIN"]
+    wlog, mlog = ["Worker listening on port 50051..."], ["2026-11-02T00:00:00Z BEGIN",
+                  "ping rep0_before: rtt min/avg/max/mdev = 6.021/59.822/199.312/43.364 ms"]
+    for host in ("mac", "windows", "wsl"):
+        open(os.path.join(raw, f"specs_{host}_20261102T000000Z.txt"), "w", newline="\n").write(f"\n{host} cpu: test\n")
     with open(os.path.join(raw, "schedule.csv"), "w", newline="\n") as f:
         f.write("order,run_id,rep,prompt_file,kv_cache,n_decode\n")
         f.writelines(f"{i},{rid},{rep},{pf},{m},{nd}\n" for i, (rid, rep, m, pf, nd) in enumerate(sched, 1))
@@ -99,6 +102,12 @@ def make(root, tamper=None):
     wl = ("\n".join(wlog) + "\n").encode()
     open(os.path.join(raw, "worker_log.txt"), "wb").write(wl)
     open(os.path.join(raw, "worker_log.mac_sha256"), "w").write(sha(wl) + "  worker_log.txt\n")
+    if tamper != "no_profile":   # written after SHA256SUMS, as profile.sh does after the matrix
+        os.makedirs(os.path.join(raw, "profile"))
+        open(os.path.join(raw, "profile", "off4.sample.log"), "w", newline="\n").write(
+            "Call graph:\n    1 main\n\nSort by top of stack, same collapsed (when >= 5):\n"
+            "        matmul_nt(float const*)  (in worker)        30\n        __recvfrom  (in libsystem_kernel.dylib)        10\n\n"
+            "Binary Images:\n")
 
 
 def run(root, *args):
@@ -122,7 +131,8 @@ rc, out = run(root); check("refuses to overwrite", rc == 1 and "refusing to over
 r2 = tempfile.mkdtemp(); make(r2, "aborted_retry")
 rc, out = run(r2); check("aborted attempt (renamed dir + other dev id) tolerated", rc == 0, out)
 expect = {"uncached_uses_cache": "W2", "uncached_consistent": "W3", "drop_timing": "W2", "token_mismatch": "W4",
-          "order": "W5", "edit_raw": "W0", "edit_matrix_log": "W0", "anchor_wrong": "W6", "wrong_prompt": "W3"}
+          "order": "W5", "edit_raw": "W0", "edit_matrix_log": "W0", "anchor_wrong": "W6", "wrong_prompt": "W3",
+          "no_profile": "W7"}
 for t, code in expect.items():
     r2 = tempfile.mkdtemp(); make(r2, t)
     rc, out = run(r2)
