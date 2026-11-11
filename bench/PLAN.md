@@ -119,6 +119,19 @@ DECISION NEEDED. The rep 1 stop rule remains: over 1.5× its estimate of 34.0 mi
 
   Result: 12 PASS lines (one per check above), `MATRIX_RESUME_TEST PASS`.
 
+### Run notes
+- 2026-11-11: batch `20261102_n12r6` died during setup and is kept as
+  `bench/raw/20261102_n12r6_died_setup/` (lock renamed `.matrix.lock.died_setup`). Its
+  `matrix.log` has only the BEGIN line, `specs_windows_*.txt` is 0 bytes and there is no
+  `die()` line, so the first Windows call (`powershell.exe` specs, `bench_matrix.sh:78`) never
+  returned under the detached tmux session. The same command run once from a WSL shell
+  exited 0 in 2.1 s. Its block worker (log `worker_kv_block_20261102T0246Z.log`) received 0
+  packets and was stopped.
+- Batch `20261111_n12r6` therefore runs in a foreground WSL terminal kept open, not in tmux:
+  `bash bench/bench_matrix.sh 20261111_n12r6 12 6 2>&1 | tee -a bench/raw/20261111_n12r6.console`.
+  Worker: PID 11199, Mac log `live_logs/worker_kv_block_20261111T0535Z.log` (launch gate
+  passed: "listening"). That log is the source for `bench/raw/20261111_n12r6/worker_log.txt`.
+
 ### Metrics (`summarize.py` → `bench/results.csv`, one row per run)
 - Prefill time (step 0), split into worker and network+client.
 - Per-run decode mean, on the total, worker and network+client series.
