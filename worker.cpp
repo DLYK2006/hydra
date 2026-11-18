@@ -362,9 +362,35 @@ int main(int argc, char* argv[]) {
     // --mode linear    : MNIST fc1 forward pass (default, backward-compat)
     // --mode layernorm : GPT-2 block-0 ln_1 forward pass
     std::string mode = "linear";
+    // M7: --layers A-B (block mode: serve only these layer_index values; others get the
+    // existing error reply) and --device-id NAME (the device_id of every reply). The
+    // defaults keep the single-worker behavior and reply bytes unchanged.
+    int layer_lo = 0, layer_hi = 11;
+    std::string device_id = "worker-mac";
     for (int i = 1; i < argc; i++) {
-        if (std::string(argv[i]) == "--mode" && i + 1 < argc) {
+        const std::string a = argv[i];
+        if (a == "--mode" && i + 1 < argc) {
             mode = argv[++i];
+        } else if (a == "--layers" && i + 1 < argc) {
+            const std::string r = argv[++i];
+            int lo = -1, hi = -1;
+            char tail = 0;
+            if (std::sscanf(r.c_str(), "%d-%d%c", &lo, &hi, &tail) != 2 || lo < 0 || hi > 11 || lo > hi) {
+                std::cout << "Bad --layers '" << r << "': want A-B with 0 <= A <= B <= 11" << std::endl;
+                return EXIT_FAILURE;
+            }
+            layer_lo = lo;
+            layer_hi = hi;
+        } else if (a == "--device-id" && i + 1 < argc) {
+            device_id = argv[++i];
+            if (device_id.empty()) {
+                std::cout << "Bad --device-id: empty" << std::endl;
+                return EXIT_FAILURE;
+            }
+        } else {
+            std::cout << "Unknown argument '" << a << "'. Use --mode M [--layers A-B] [--device-id NAME]"
+                      << std::endl;
+            return EXIT_FAILURE;
         }
     }
     if (mode != "linear" && mode != "layernorm" && mode != "qkv"
@@ -372,6 +398,10 @@ int main(int argc, char* argv[]) {
         std::cout << "Unknown mode '" << mode
                   << "'. Use --mode linear|layernorm|qkv|attention|mlp|block"
                   << std::endl;
+        return EXIT_FAILURE;
+    }
+    if (mode != "block" && (layer_lo != 0 || layer_hi != 11)) {
+        std::cout << "--layers applies only to --mode block" << std::endl;
         return EXIT_FAILURE;
     }
     std::cout << "Worker mode: " << mode << std::endl;
@@ -509,6 +539,9 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "KV cache: " << kv_bytes << " bytes (" << N_BLOCKS << " layers x K,V x "
                   << KV_CAPACITY << " x " << HIDDEN_DIM << " fp32)" << std::endl;
+        // M7: the range this worker serves, read back by scripts/m7_check.sh.
+        std::cout << "Worker layers " << layer_lo << "-" << layer_hi << " device_id " << device_id
+                  << std::endl;
     }
 
     int server_fd;
@@ -555,6 +588,11 @@ int main(int argc, char* argv[]) {
         if (setsockopt(new_socket, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
             perror("Warning: setsockopt TCP_NODELAY");
         }
+
+        // M7: the peer as accept() reported it, logged on every WIRE line.
+        char peer_ip[INET_ADDRSTRLEN] = "?";
+        inet_ntop(AF_INET, &address.sin_addr, peer_ip, sizeof(peer_ip));
+        const int peer_port = ntohs(address.sin_port);
 
         int packets_received = 0;
         bool connection_ok = true;
@@ -610,9 +648,28 @@ int main(int argc, char* argv[]) {
             std::cout << "] seq=" << packet.sequence_id()
                       << " start_pos=" << packet.start_pos() << std::endl;
 
+            // M7: every reply goes through send_reply, which counts its wire bytes
+            // (4-byte prefix + payload, as sendPacket writes them); log_wire then prints
+            // one line per request after its reply (or error reply) is on the wire.
+            size_t tx_bytes = 0;
+            int replies = 0;
+            auto send_reply = [&](const std::string& s) {
+                if (!sendPacket(new_socket, s)) return false;
+                tx_bytes += sizeof(uint32_t) + s.size();
+                replies++;
+                return true;
+            };
+            auto log_wire = [&]() {
+                std::cout << "WIRE from=" << packet.device_id() << " peer=" << peer_ip << ":" << peer_port
+                          << " layer=" << packet.layer_index()
+                          << " T=" << (packet.shape_size() > 0 ? packet.shape(0) : -1)
+                          << " rx_bytes=" << sizeof(uint32_t) + msg_len << " tx_bytes=" << tx_bytes
+                          << " replies=" << replies << std::endl;
+            };
+
             hydra::TensorPacket response;
             response.set_layer_index(packet.layer_index());
-            response.set_device_id("worker-mac");
+            response.set_device_id(device_id);
 
             if (mode == "linear") {
                 // --- linear mode: validate 1-D input against IN_DIM ---
@@ -799,7 +856,7 @@ int main(int argc, char* argv[]) {
                 {
                     hydra::TensorPacket gelu_resp;
                     gelu_resp.set_layer_index(packet.layer_index());
-                    gelu_resp.set_device_id("worker-mac");
+                    gelu_resp.set_device_id(device_id);
                     for (float v : gelu_out) gelu_resp.add_data(v);
                     gelu_resp.add_shape(pkt_T);
                     gelu_resp.add_shape(MLP_HIDDEN_DIM);
@@ -809,7 +866,7 @@ int main(int argc, char* argv[]) {
                         connection_ok = false;
                         break;
                     }
-                    if (!sendPacket(new_socket, s)) {
+                    if (!send_reply(s)) {
                         std::cout << "Failed to send GELU response: "
                                   << strerror(errno) << std::endl;
                         connection_ok = false;
@@ -821,7 +878,7 @@ int main(int argc, char* argv[]) {
                 {
                     hydra::TensorPacket proj_resp;
                     proj_resp.set_layer_index(packet.layer_index());
-                    proj_resp.set_device_id("worker-mac");
+                    proj_resp.set_device_id(device_id);
                     for (float v : proj_out) proj_resp.add_data(v);
                     proj_resp.add_shape(pkt_T);
                     proj_resp.add_shape(HIDDEN_DIM);
@@ -831,7 +888,7 @@ int main(int argc, char* argv[]) {
                         connection_ok = false;
                         break;
                     }
-                    if (!sendPacket(new_socket, s)) {
+                    if (!send_reply(s)) {
                         std::cout << "Failed to send proj response: "
                                   << strerror(errno) << std::endl;
                         connection_ok = false;
@@ -841,6 +898,7 @@ int main(int argc, char* argv[]) {
 
                 std::cout << "Sent 2 MLP response packets (gelu + proj) for layer "
                           << packet.layer_index() << std::endl;
+                log_wire();
 
                 // Skip the generic single-packet serialize/send below; both
                 // response packets are already on the wire.
@@ -864,9 +922,9 @@ int main(int argc, char* argv[]) {
                 // no data, no shape is the "rejected" contract, since a valid
                 // reply always has shape [T, 768]). Connection and worker stay up.
                 const int L = packet.layer_index();
-                if (L < 0 || L >= N_BLOCKS) {
+                if (L < layer_lo || L > layer_hi) {   // M7: this worker's --layers range
                     std::cout << "Rejecting packet: layer_index " << L
-                              << " outside [0, " << N_BLOCKS - 1 << "]; sending error reply"
+                              << " outside [" << layer_lo << ", " << layer_hi << "]; sending error reply"
                               << std::endl;
                     std::string err_serialized;
                     if (!response.SerializeToString(&err_serialized)) {
@@ -874,11 +932,12 @@ int main(int argc, char* argv[]) {
                         connection_ok = false;
                         break;
                     }
-                    if (!sendPacket(new_socket, err_serialized)) {
+                    if (!send_reply(err_serialized)) {
                         std::cout << "Failed to send error reply: " << strerror(errno) << std::endl;
                         connection_ok = false;
                         break;
                     }
+                    log_wire();
                     continue;
                 }
                 const BlockWeights& w = blocks[L];
@@ -925,11 +984,12 @@ int main(int argc, char* argv[]) {
                             connection_ok = false;
                             break;
                         }
-                        if (!sendPacket(new_socket, err_serialized)) {
+                        if (!send_reply(err_serialized)) {
                             std::cout << "Failed to send error reply: " << strerror(errno) << std::endl;
                             connection_ok = false;
                             break;
                         }
+                        log_wire();
                         continue;
                     }
                     if (new_seq) {   // all checks passed: now (and only now) reset
@@ -1121,7 +1181,7 @@ int main(int argc, char* argv[]) {
 
             const long long compute_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t_parsed).count();   // bench: window end
-            if (!sendPacket(new_socket, response_serialized)) {
+            if (!send_reply(response_serialized)) {
                 std::cout << "Failed to send response: " << strerror(errno) << std::endl;
                 connection_ok = false;
                 break;
@@ -1133,6 +1193,7 @@ int main(int argc, char* argv[]) {
                       << " T=" << (packet.shape_size() > 0 ? packet.shape(0) : -1)
                       << " seq=" << packet.sequence_id() << " start_pos=" << packet.start_pos()
                       << " compute_us=" << compute_us << std::endl;
+            log_wire();
         }
 
         close(new_socket);

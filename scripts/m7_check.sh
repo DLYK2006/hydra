@@ -203,7 +203,8 @@ def size(layer, dev, T, seq=0, sp=0):         # exact wire bytes of an activatio
     p.data.extend([0.0] * (T * H)); p.shape.extend([T, H])
     return 4 + p.ByteSize()                   # packed fixed32 floats: size does not depend on values
 
-wire = re.compile(r"^WIRE from=(\S+) peer=([0-9.]+):(\d+) layer=(-?\d+) T=(\d+) rx_bytes=(\d+) tx_bytes=(\d+) replies=(\d+)$")
+# T=-1 is a request without a shape (worker.cpp logs -1); it must still be parsed so its peer is checked.
+wire = re.compile(r"^WIRE from=(\S+) peer=([0-9.]+):(\d+) layer=(-?\d+) T=(-?\d+) rx_bytes=(\d+) tx_bytes=(\d+) replies=(\d+)$")
 recv = re.compile(r"^Received TensorPacket #\d+ from '([^']*)' \(layer (-?\d+)\), (\d+) floats, shape \[([^\]]*)\]")
 W, R = {}, {}                                 # device -> list of parsed WIRE / Received lines
 for dev, path in logs.items():

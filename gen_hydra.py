@@ -5,6 +5,15 @@ gen_hydra.py  --  G4: greedy GPT-2 generation through the Hydra Mac worker.
 Usage (from repo root, Windows Python; the Mac worker runs the G3/KV build in --mode block):
   python gen_hydra.py --out DIR [--host 10.0.0.62] [--port 50051] [--timeout 10]
                       [--kv-cache on|off] [--n-gen 20] [--prompt TEXT]
+                      [--route A-B=HOST:PORT/DEV,...] [--client-id ID] [--connect-timeout 3]
+
+M7 (docs/m7_plan.md section 1): --route splits the 12 layers across workers (ranges must cover
+  0..11 exactly once); without it, all 12 go to --host:--port and replies must say "worker-mac"
+  (the pre-M7 client). One persistent connection per worker for the whole run. Prints READY
+  (before connecting) and CONNECTED (before the first send), flushed. Any worker failure prints
+  "ERROR: worker HOST:PORT (layers A-B, DEV): REASON" and exits 2, writing nothing. Replies with
+  unknown protobuf fields, or from the wrong device_id, are rejected. With --route, DIR/route.txt
+  records every packet's endpoint, reply device_id, floats and wire bytes.
 
 --kv-cache off (default): exactly the G4 client below (no sequence_id; same wire bytes,
   arithmetic and outputs). --kv-cache on: one random nonzero sequence_id per run; step 0
@@ -56,6 +65,7 @@ import sys
 
 import numpy as np
 import torch
+from google.protobuf import unknown_fields
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2Tokenizer
 
@@ -100,31 +110,99 @@ def recv_packet(sock):
     return pkt
 
 
-def run_blocks(x, host, port, timeout, sends, seq=0, start_pos=0):
-    """Send x [T, 768] float32 through blocks 0..11 on one connection; return the output.
-    seq != 0: KV-cached sequence, x holds positions start_pos.. . Appends one
-    (layer, sequence_id, start_pos, T) tuple per packet sent to `sends`."""
+class Worker:
+    """One block worker: the contiguous layer range it owns, its endpoint and the device_id its
+    replies must carry (M7 --route). The default route is one worker for all 12 layers."""
+    def __init__(self, lo, hi, host, port, dev):
+        self.lo, self.hi, self.host, self.port, self.dev = lo, hi, host, port, dev
+        self.sock = None
+
+    def name(self):
+        return f"{self.host}:{self.port} (layers {self.lo}-{self.hi}, {self.dev})"
+
+
+class WorkerError(Exception):
+    """A failure attributable to one worker (connect, send, recv, timeout, bad reply)."""
+    def __init__(self, worker, reason):
+        super().__init__(reason)
+        self.worker = worker
+
+
+def parse_route(spec, host, port):
+    """--route "A-B=HOST:PORT/DEVICE,..." -> [Worker]; ranges must cover 0..11 exactly once.
+    No --route: all layers on host:port, device "worker-mac" (the pre-M7 client)."""
+    if spec is None:
+        return [Worker(0, N_BLOCKS - 1, host, port, "worker-mac")]
+    workers = []
+    try:
+        for part in spec.split(","):
+            rng, dest = part.split("=")
+            ep, dev = dest.split("/")
+            h, p = ep.rsplit(":", 1)
+            lo, hi = map(int, rng.split("-"))
+            workers.append(Worker(lo, hi, h, int(p), dev))
+    except ValueError:
+        sys.exit(f"ERROR: bad --route {spec!r}: want A-B=HOST:PORT/DEVICE[,...]")
+    covered = sorted(l for w in workers for l in range(w.lo, w.hi + 1))
+    if covered != list(range(N_BLOCKS)) or any(not w.dev for w in workers):
+        sys.exit(f"ERROR: --route {spec!r} must cover layers 0-{N_BLOCKS - 1} exactly once")
+    return workers
+
+
+def recv_packet_sized(sock):
+    """recv_packet that also returns the wire size (4-byte prefix + payload)."""
+    (n,) = struct.unpack("!I", recv_exact(sock, 4))
+    if n > MAX_MSG_LEN:
+        raise ValueError(f"reply length prefix {n} exceeds MAX_MSG_LEN {MAX_MSG_LEN}")
+    pkt = hydra_pb2.TensorPacket()
+    pkt.ParseFromString(recv_exact(sock, n))
+    return pkt, 4 + n
+
+
+def connect_all(workers, connect_timeout, timeout):
+    """One persistent TCP connection per worker for the whole run, opened before step 0."""
+    for w in workers:
+        try:
+            w.sock = socket.create_connection((w.host, w.port), timeout=connect_timeout)
+            w.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            w.sock.settimeout(timeout)                 # every recv from here on
+        except OSError as e:
+            raise WorkerError(w, f"connect failed: {e!r}")
+
+
+def run_blocks(x, owner, client_id, sends, route_rows, seq=0, start_pos=0):
+    """Send x [T, 768] float32 through blocks 0..11, each over its owner's connection; return
+    the output. seq != 0: KV-cached sequence, x holds positions start_pos.. . Appends one
+    (layer, sequence_id, start_pos, T) tuple per packet to `sends`, and one
+    (layer, endpoint, reply_device_id, T, req_floats, reply_floats, req_bytes, reply_bytes)
+    tuple to `route_rows`."""
     T = x.shape[0]
-    with socket.create_connection((host, port), timeout=timeout) as s:
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        for n in range(N_BLOCKS):
-            pkt = hydra_pb2.TensorPacket(layer_index=n, device_id=DEVICE_ID)
-            if seq:   # unset when 0, so the cache-off wire bytes are unchanged
-                pkt.sequence_id = seq
-                pkt.start_pos = start_pos
-            pkt.data.extend(x.reshape(-1).tolist())    # float32 -> Python float: exact
-            pkt.shape.extend([T, HIDDEN])
-            send_packet(s, pkt)
-            sends.append((pkt.layer_index, pkt.sequence_id, pkt.start_pos, pkt.shape[0]))
-            r = recv_packet(s)
-            if len(r.shape) == 0:
-                raise RuntimeError(f"worker rejected layer_index {r.layer_index}")
-            if (r.layer_index != n or r.device_id != "worker-mac"
-                    or list(r.shape) != [T, HIDDEN] or len(r.data) != T * HIDDEN):
-                raise RuntimeError(f"bad reply for block {n}: layer_index={r.layer_index} "
-                                   f"device_id={r.device_id!r} shape={list(r.shape)} "
-                                   f"data={len(r.data)}")
-            x = torch.from_numpy(np.array(r.data, dtype=np.float32)).view(T, HIDDEN)
+    for n in range(N_BLOCKS):
+        w = owner[n]
+        pkt = hydra_pb2.TensorPacket(layer_index=n, device_id=client_id)
+        if seq:   # unset when 0, so the cache-off wire bytes are unchanged
+            pkt.sequence_id = seq
+            pkt.start_pos = start_pos
+        pkt.data.extend(x.reshape(-1).tolist())    # float32 -> Python float: exact
+        pkt.shape.extend([T, HIDDEN])
+        try:
+            send_packet(w.sock, pkt)
+            r, rbytes = recv_packet_sized(w.sock)
+        except (OSError, ConnectionError, ValueError, struct.error) as e:   # incl. socket.timeout
+            raise WorkerError(w, f"layer {n}: {e!r}")
+        sends.append((pkt.layer_index, pkt.sequence_id, pkt.start_pos, pkt.shape[0]))
+        if len(unknown_fields.UnknownFieldSet(r)):
+            raise WorkerError(w, f"layer {n}: reply has unknown protobuf fields")
+        if len(r.shape) == 0:
+            raise WorkerError(w, f"worker rejected layer_index {r.layer_index}")
+        if (r.layer_index != n or r.device_id != w.dev
+                or list(r.shape) != [T, HIDDEN] or len(r.data) != T * HIDDEN):
+            raise WorkerError(w, f"bad reply for block {n}: layer_index={r.layer_index} "
+                                 f"device_id={r.device_id!r} (want {w.dev!r}) shape={list(r.shape)} "
+                                 f"data={len(r.data)}")
+        route_rows.append((n, f"{w.host}:{w.port}", r.device_id, T, len(pkt.data), len(r.data),
+                           4 + pkt.ByteSize(), rbytes))
+        x = torch.from_numpy(np.array(r.data, dtype=np.float32)).view(T, HIDDEN)
     return x
 
 
@@ -133,18 +211,24 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--host", default="10.0.0.62")   # Mac worker, as in orchestrator.cpp:255
     ap.add_argument("--port", type=int, default=50051)
-    ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--timeout", type=float, default=10.0)          # every recv
+    ap.add_argument("--connect-timeout", type=float, default=3.0)   # every connect (M7)
     ap.add_argument("--kv-cache", choices=["on", "off"], default="off")
     ap.add_argument("--n-gen", type=int, default=N_GEN)
     ap.add_argument("--prompt", default=PROMPT)
+    ap.add_argument("--route", default=None)          # M7: "0-5=HOST:PORT/DEV,6-11=HOST:PORT/DEV"
+    ap.add_argument("--client-id", default=DEVICE_ID) # device_id of every request
     a = ap.parse_args()
     cache = a.kv_cache == "on"
+    workers = parse_route(a.route, a.host, a.port)
+    owner = {n: w for w in workers for n in range(w.lo, w.hi + 1)}
 
     tok_path = os.path.join(a.out, "tokens.txt")
     log_path = os.path.join(a.out, "logits_f64.bin")
     hid_path = os.path.join(a.out, "hidden_f32.bin")
     snd_path = os.path.join(a.out, "sends.txt")
-    for p in (tok_path, log_path, hid_path, snd_path):
+    rte_path = os.path.join(a.out, "route.txt")        # only written with --route
+    for p in (tok_path, log_path, hid_path, snd_path, rte_path):
         if os.path.exists(p):
             sys.exit(f"ERROR: {p} exists; refusing to overwrite")
     os.makedirs(a.out, exist_ok=True)
@@ -159,7 +243,46 @@ def main():
 
     prompt_ids = tokenizer.encode(a.prompt)
     seq = (secrets.randbits(63) | 1) if cache else 0   # nonzero; fresh per run
-    tokens, rows, hidden, sends = [], [], [], []
+    tokens, rows, hidden, sends, route_rows = [], [], [], [], []
+    # M7 markers (flushed): READY after imports and the model load, before any connection;
+    # CONNECTED once every worker connection is open, before the first send. Failure time
+    # limits in scripts/m7_check.sh count from these, never from process start.
+    print("READY", flush=True)
+    try:
+        connect_all(workers, a.connect_timeout, a.timeout)
+        print("CONNECTED " + " ".join(f"{w.host}:{w.port}" for w in workers), flush=True)
+        generate(a, cache, prompt_ids, seq, model, tokenizer, head_f64, owner,
+                 tokens, rows, hidden, sends, route_rows)
+    except WorkerError as e:   # nothing is written on any failure
+        print(f"ERROR: worker {e.worker.name()}: {e}", flush=True)
+        sys.exit(2)
+    finally:
+        for w in workers:
+            if w.sock is not None:
+                w.sock.close()
+
+    torch.stack(rows).numpy().astype(np.float64).tofile(log_path)
+    np.concatenate(hidden, axis=0).astype(np.float32).tofile(hid_path)
+    with open(tok_path, "w", newline="\n") as f:
+        f.write("# Hydra greedy tokens -- gen_hydra.py (blocks on the Mac worker)\n")
+        f.write(f"# PROMPT = {a.prompt!r}\n# N_GEN  = {a.n_gen}\n# step  token_id  decoded\n")
+        for step, tid in enumerate(tokens):
+            f.write(f"{step:4d}  {tid:7d}  {repr(tokenizer.decode([tid]))}\n")
+    with open(snd_path, "w", newline="\n") as f:
+        f.write("# step layer sequence_id start_pos T\n")
+        f.writelines(" ".join(map(str, t)) + "\n" for t in sends)
+    wrote = f"{tok_path}, {log_path}, {hid_path} and {snd_path}"
+    if a.route is not None:
+        with open(rte_path, "w", newline="\n") as f:
+            f.write("# step layer endpoint reply_device_id T req_floats reply_floats req_bytes reply_bytes\n")
+            f.writelines(" ".join(map(str, t)) + "\n" for t in route_rows)
+        wrote = f"{tok_path}, {log_path}, {hid_path}, {snd_path} and {rte_path}"
+    print(f"Wrote {wrote}")
+
+
+def generate(a, cache, prompt_ids, seq, model, tokenizer, head_f64, owner,
+             tokens, rows, hidden, sends, route_rows):
+    """The greedy loop (unchanged arithmetic); fills tokens/rows/hidden/sends/route_rows."""
     with torch.no_grad():
         for step in range(a.n_gen):
             if cache and step > 0:   # decode: only the newest token, at its absolute position
@@ -172,28 +295,17 @@ def main():
                 pos = torch.arange(ids.shape[1], dtype=torch.long).unsqueeze(0)
             T = ids.shape[1]
             x = (model.wte(ids) + model.wpe(pos)).squeeze(0).float()
-            n0 = len(sends)
-            x = run_blocks(x, a.host, a.port, a.timeout, sends, seq, start)
+            n0, r0 = len(sends), len(route_rows)
+            x = run_blocks(x, owner, a.client_id, sends, route_rows, seq, start)
             sends[n0:] = [(step,) + t for t in sends[n0:]]
+            route_rows[r0:] = [(step,) + t for t in route_rows[r0:]]
             hidden.append(x.numpy().astype(np.float32))   # block-11 output, [T, 768]
             # cache on: head on the newest row only (owner decision; bounded in kv_compare.py)
             logits = head_f64(x[-1:] if cache else x)[-1]   # [50257] float64
             tid = int(logits.argmax())
             tokens.append(tid)
             rows.append(logits)
-            print(f"step {step:2d}  T={T:2d}  token={tid:5d} {tokenizer.decode([tid])!r}")
-
-    torch.stack(rows).numpy().astype(np.float64).tofile(log_path)
-    np.concatenate(hidden, axis=0).astype(np.float32).tofile(hid_path)
-    with open(tok_path, "w", newline="\n") as f:
-        f.write("# Hydra greedy tokens -- gen_hydra.py (blocks on the Mac worker)\n")
-        f.write(f"# PROMPT = {a.prompt!r}\n# N_GEN  = {a.n_gen}\n# step  token_id  decoded\n")
-        for step, tid in enumerate(tokens):
-            f.write(f"{step:4d}  {tid:7d}  {repr(tokenizer.decode([tid]))}\n")
-    with open(snd_path, "w", newline="\n") as f:
-        f.write("# step layer sequence_id start_pos T\n")
-        f.writelines(" ".join(map(str, t)) + "\n" for t in sends)
-    print(f"Wrote {tok_path}, {log_path}, {hid_path} and {snd_path}")
+            print(f"step {step:2d}  T={T:2d}  token={tid:5d} {tokenizer.decode([tid])!r}", flush=True)
 
 
 if __name__ == "__main__":
