@@ -40,6 +40,9 @@ PROTO_DEF  := hydra.proto
 
 # --- Output binary ------------------------------------------------------------
 TARGET := orchestrator
+# M7 step 0: the worker built on WSL2 (same CXX/CXXFLAGS/LIBS as the orchestrator).
+# Separate name so `pgrep -x worker` on the Mac and this binary never get confused.
+WORKER_BIN := worker_linux
 
 # --- Targets ------------------------------------------------------------------
 
@@ -51,6 +54,11 @@ all: $(TARGET)
 $(TARGET): $(SRC) $(PROTO_SRC) $(PROTO_HDR)
 	$(CXX) $(CXXFLAGS) $(SRC) $(PROTO_SRC) $(LIBS) -o $(TARGET)
 	@echo "[build] $(TARGET) ready (platform: $(UNAME))"
+
+# WSL2 worker: `make worker_linux`. Not part of `make`/`all`.
+$(WORKER_BIN): worker.cpp $(PROTO_SRC) $(PROTO_HDR)
+	$(CXX) $(CXXFLAGS) worker.cpp $(PROTO_SRC) $(LIBS) -o $(WORKER_BIN)
+	@echo "[build] $(WORKER_BIN) ready (platform: $(UNAME))"
 
 # Regenerate protobuf files from schema
 # Run this whenever hydra.proto changes
@@ -67,5 +75,5 @@ run: $(TARGET)
 # Remove all build artifacts
 # Does NOT delete generated .pb files — those are regenerated per machine
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(WORKER_BIN) orchestrator_local
 	@echo "[clean] done"

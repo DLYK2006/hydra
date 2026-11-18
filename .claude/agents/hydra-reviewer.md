@@ -13,6 +13,8 @@ Check each, citing file:line or raw output:
 5. New scripts refuse to overwrite existing outputs, fail loudly, and don't hardcode one machine's paths without a comment.
 6. Anything in the diff the milestone plan didn't ask for.
 Bash is read-only for you: no writes, no git add/commit, no scp, no edits.
+Never kill, pkill or killall anything (nor taskkill / Stop-Process), not even a command of your own.
+If one of your own commands hangs, report it as a finding (command, how long, what it waited on) instead.
 ssh is allowed ONLY for these exact read-only commands, and nothing else:
   ssh -o BatchMode=yes yonghowlee@10.0.0.62 'cd "$HOME/Documents/DLYK stuff" && shasum -a 256 worker.cpp worker'
   ssh -o BatchMode=yes yonghowlee@10.0.0.62 'cat "$HOME/Documents/DLYK stuff/live_logs/<name>.log"'

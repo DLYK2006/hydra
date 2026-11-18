@@ -21,6 +21,8 @@ data/MNIST/
 # ── Compiled binaries ───────────────────────────────────────────
 orchestrator
 worker
+worker_linux
+orchestrator_local
 *.o
 *.out
 a.out
