@@ -82,7 +82,7 @@ for f in gen_hydra.py worker.cpp orchestrator.cpp hydra.proto scripts/m7_check.s
   git cat-file -e "HEAD:$f" 2>/dev/null || die "ERROR: $f is not committed"
   git diff --quiet HEAD -- "$f" || die "ERROR: $f differs from its committed version"
 done
-(cd data && sha256sum -c --quiet g5_hydra_logits.sha256) || die "ERROR: frozen logits != pin"
+sha256sum -c --quiet data/g5_hydra_logits.sha256 || die "ERROR: frozen logits != pin"   # pin paths are repo-root relative
 # Static guarantee that a worker cannot talk to anything but the client that connected to it:
 # exactly one socket() (the SOCK_STREAM listener), no connect(), no datagram send paths.
 grep -nE '\bconnect\s*\(|\bsendto\s*\(|\bsendmsg\s*\(|SOCK_DGRAM' worker.cpp \
