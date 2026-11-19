@@ -291,7 +291,7 @@ ready_t0() { wait_for "$COUT.log" '^READY' "$READY_MAX_S" || { echo "FAIL $1: no
 free=$("$PY" -c "
 import socket
 try:
-    socket.create_connection(('127.0.0.1', 50052), 2)
+    socket.create_connection(('127.0.0.1', 50052), 5)   # Windows reports a localhost refusal after ~2.05 s: data/live/m7_evidence_20261118/windows_refuse_timing.txt
     print('accepted')
 except ConnectionRefusedError:
     print('refused')

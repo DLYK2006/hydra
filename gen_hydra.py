@@ -149,6 +149,16 @@ def parse_route(spec, host, port):
     return workers
 
 
+def marker(text):
+    """Print a READY/CONNECTED/ERROR marker on a line of its own. transformers' weight-loading
+    progress bar writes \\r-terminated text to stderr with no final newline, and it can still be
+    writing when READY is printed (data/live/m7_evidence_20261118/exit_probe_2.log:
+    '...weight]READY\\rLoading weights: 80%'), so a marker could land mid-line where the
+    checker's '^READY' / '^ERROR: worker' cannot match. The leading newline ends any open line."""
+    sys.stderr.flush()
+    print("\n" + text, flush=True)
+
+
 def recv_packet_sized(sock):
     """recv_packet that also returns the wire size (4-byte prefix + payload)."""
     (n,) = struct.unpack("!I", recv_exact(sock, 4))
@@ -247,14 +257,14 @@ def main():
     # M7 markers (flushed): READY after imports and the model load, before any connection;
     # CONNECTED once every worker connection is open, before the first send. Failure time
     # limits in scripts/m7_check.sh count from these, never from process start.
-    print("READY", flush=True)
+    marker("READY")
     try:
         connect_all(workers, a.connect_timeout, a.timeout)
-        print("CONNECTED " + " ".join(f"{w.host}:{w.port}" for w in workers), flush=True)
+        marker("CONNECTED " + " ".join(f"{w.host}:{w.port}" for w in workers))
         generate(a, cache, prompt_ids, seq, model, tokenizer, head_f64, owner,
                  tokens, rows, hidden, sends, route_rows)
     except WorkerError as e:   # nothing is written on any failure
-        print(f"ERROR: worker {e.worker.name()}: {e}", flush=True)
+        marker(f"ERROR: worker {e.worker.name()}: {e}")
         sys.exit(2)
     finally:
         for w in workers:
